@@ -3,11 +3,12 @@ import http, { type Server } from "node:http";
 import https from "node:https";
 import { z } from "zod";
 import { storage } from "./storage";
-import { registerGitHubRoutes, repoContext, changeInstructions, runGitAction, describeAction } from "./githubRoutes";
+import { registerGitHubRoutes, repoContext, changeInstructions, runGitAction, describeAction, applyingRuns } from "./githubRoutes";
 import { registerSearchRoutes, searchEnabled, research, researchSchema, type ResearchItem } from "./websearch";
 import { detectWorkflow, detectGitActions, mentionsGitHub, gitActionSchema, type GitAction } from "./intent";
 import { projectSchema, agentSchema, runInputSchema, type Agent, type Run, type Role, type Step, type ModelRequest, type RuntimeOptions } from "@shared/schema";
 import { sessionPath } from "./sessions";
+import { archiveTurn, conversationContext } from "@shared/conversation";
 
 // Hardware profile: Intel Arc Pro B60 24 GB (or RTX 3070 8 GB) + 32 GB RAM. One shared model, sequential roles, quality over speed.
 const RUNTIME = process.env.RELAY_RUNTIME === "openai" ? "openai" : "ollama"; // "openai" = llama.cpp llama-server
@@ -35,8 +36,12 @@ const roles = ["architect", "coder", "tester", "data", "analyst"] as const;
 const event = (message: string) => ({ time: new Date().toISOString(), message });
 const getAgents = (): Agent[] => storage.list("agents")[0].items;
 const publicRun = (run: Run) => {
-  const { context, agents, webContext, plannerRequest, projectSnapshot, ...safe } = run;
+  const { context, agents, webContext, plannerRequest, projectSnapshot, turns, ...safe } = run;
   return { ...safe, sessionFile: `sessions/session-${run.id}.json`,
+    turns: turns?.map(turn => {
+      const { context, agents, webContext, plannerRequest, projectSnapshot, ...visible } = turn;
+      return { ...visible, steps: turn.steps.map(({ modelRequest, lastRequest, ...step }) => step) };
+    }),
     steps: run.steps.map(({ modelRequest, lastRequest, ...step }) => step) };
 };
 const busy = () => controllers.size > 0;
@@ -304,6 +309,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
   app.get("/api/runs/:id", (req, res) => {
     const run = storage.get(Number(req.params.id), "run"); if (!run) return res.status(404).json({ message: "Run not found." }); res.json(publicRun(run));
   });
+  app.delete("/api/runs/:id", (req, res) => {
+    const id = Number(req.params.id);
+    if (!Number.isSafeInteger(id) || id <= 0) return res.status(400).json({ message: "Invalid conversation ID." });
+    const run = storage.get(id, "run") as Run | undefined;
+    if (!run) return res.status(404).json({ message: "Conversation not found." });
+    if (controllers.has(id) || applyingRuns.has(id) || ["planning", "running", "pausing"].includes(run.status) ||
+        run.gitActions?.some(action => action.status === "running")) {
+      return res.status(409).json({ message: "Pause or stop this conversation and wait for all work to finish before deleting it." });
+    }
+    try { storage.deleteRun(id); res.json({ deleted: true, id }); }
+    catch { res.status(500).json({ message: "Could not delete the saved conversation. Check file permissions and try again." }); }
+  });
   async function plan(id: number, controller: AbortController) {
     const run = liveRuns.get(id)!;
     const input = { data: { request: run.request, mode: run.mode, projectId: run.projectId } };
@@ -312,20 +329,23 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     let steps: Step[];
     let sourceContext = "", contextNote = "";
     try {
+      const history = conversationContext(run.turns || [], Math.floor(SOURCE_CHARS / 3));
+      const sourceBudget = Math.max(0, SOURCE_CHARS - history.length - 40);
       if (run.contextReady) {
         sourceContext = run.context || ""; contextNote = "Using the saved source-context snapshot.";
       } else if (project?.repo) {
-        const c = await repoContext(project, input.data.request, SOURCE_CHARS);
+        const c = await repoContext(project, input.data.request, sourceBudget);
         sourceContext = c.text; contextNote = c.note;
       } else {
         const fullContext = (project?.files || []).map((f: any) => `FILE: ${f.name}\n${f.content}`).join("\n\n");
-        sourceContext = fullContext.slice(0, SOURCE_CHARS);
+        sourceContext = fullContext.slice(0, sourceBudget);
         contextNote = `Context: ${sourceContext.length.toLocaleString("en-US")} characters${fullContext.length > sourceContext.length ? ` of ${fullContext.length.toLocaleString("en-US")} (truncated)` : ""}`;
       }
+      if (!run.contextReady && history) sourceContext = `${history}\nCURRENT PROJECT SOURCE:\n${sourceContext}`;
       run.context = sourceContext; run.contextReady = true; saveRun(run);
       if (controller.signal.aborted) return;
       // GitHub intentions: workflow (pull request vs direct) and pull request/branch actions, understood from the request.
-      const workflow = project?.repo ? detectWorkflow(input.data.request) || project.repo.workflow || "pull_request" : undefined;
+      const workflow = project?.repo ? detectWorkflow(input.data.request) || run.workflow || project.repo.workflow || "pull_request" : undefined;
       let gitActions: GitAction[] = project?.repo && input.data.mode !== "demo" ? detectGitActions(input.data.request) : []; // demo never touches GitHub
       const researchItems: ResearchItem[] = [];
       if (input.data.mode === "demo") steps = demoPlan(input.data.request).filter(s => agents.some(a => a.role === s.role));
@@ -379,6 +399,32 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       runtimeOptions: { runtime: RUNTIME, endpoint: ENDPOINT, modelOverride: MODEL_OVERRIDE, context: CTX,
         maxTokens: MAX_TOKENS, think: THINK, keepAlive: KEEP_ALIVE, timeoutMinutes: TIMEOUT_MIN, priorChars: PRIOR_CHARS },
       createdAt: new Date().toISOString(), savedAt: new Date().toISOString() }) as Run;
+    const controller = new AbortController(); controllers.set(run.id, controller); liveRuns.set(run.id, run);
+    res.status(202).json(publicRun(run)); void plan(run.id, controller);
+  });
+  app.post("/api/runs/:id/messages", (req, res) => {
+    const input = z.object({ request: runInputSchema.shape.request, expectedTurn: z.number().int().nonnegative() }).safeParse(req.body);
+    if (!input.success) return res.status(400).json({ message: "Enter a follow-up of 3–6000 characters and reload the current conversation." });
+    const previous = storage.get(Number(req.params.id), "run") as Run | undefined;
+    if (!previous) return res.status(404).json({ message: "Conversation not found." });
+    if (applyingRuns.has(previous.id)) return res.status(409).json({ message: "Wait for this conversation's changes to finish applying before replying." });
+    if (busy()) return res.status(409).json({ message: "A task is active. Wait for it to finish or stop it before sending a follow-up." });
+    if (!["complete", "failed", "cancelled"].includes(previous.status)) return res.status(409).json({ message: "Resume or stop the current task first. A new message can follow a completed, failed or stopped response." });
+    if ((previous.turns?.length || 0) !== input.data.expectedTurn) return res.status(409).json({ message: "This conversation changed in another window. Reload it before sending the follow-up." });
+    if (previous.gitActions?.some(action => ["running", "uncertain"].includes(action.status || ""))) return res.status(409).json({ message: "Verify the interrupted GitHub action first. Start a separate task for remaining work; this conversation cannot safely continue automatically." });
+    const agents = getAgents().filter(a => a.enabled);
+    if (agents.length < 2 || !agents.some(a => a.role === "orchestrator")) return res.status(400).json({ message: "Enable an orchestrator and at least one specialist." });
+    const project = previous.projectId ? storage.get(previous.projectId, "project") || previous.projectSnapshot : undefined;
+    const run: Run = {
+      id: previous.id, request: input.data.request, mode: previous.mode, projectId: previous.projectId,
+      projectName: project?.name || previous.projectName, projectSnapshot: project,
+      createdAt: previous.createdAt, messageAt: new Date().toISOString(), savedAt: new Date().toISOString(),
+      turns: [...(previous.turns || []), archiveTurn(previous)], status: "planning", phase: "planning",
+      steps: [], agents, workflow: previous.workflow, events: [event("Follow-up saved in this conversation. Preparing a new plan with previous messages and outputs.")],
+      runtimeOptions: { runtime: RUNTIME, endpoint: ENDPOINT, modelOverride: MODEL_OVERRIDE, context: CTX,
+        maxTokens: MAX_TOKENS, think: THINK, keepAlive: KEEP_ALIVE, timeoutMinutes: TIMEOUT_MIN, priorChars: PRIOR_CHARS },
+    };
+    storage.update(run.id, run);
     const controller = new AbortController(); controllers.set(run.id, controller); liveRuns.set(run.id, run);
     res.status(202).json(publicRun(run)); void plan(run.id, controller);
   });

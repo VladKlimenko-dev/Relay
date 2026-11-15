@@ -116,3 +116,8 @@ button,input,textarea,select{font:inherit}button,a,input,textarea,select{-webkit
 .search-results small { opacity: .6; } .search-results span { font-size: 13px; opacity: .85; }
 .source-list { padding: 6px 12px 10px; font-size: 12px; gap: 4px; }
 @media (max-width: 800px) { .files-tab { grid-template-columns: 1fr; } }
+.conversation-history-row { display: flex; align-items: center; border-top: 1px solid var(--line); padding-right: 12px; }
+.conversation-history-row .run-row { flex: 1; min-width: 0; border-top: 0; }
+.conversation-history-row > .icon-button { flex-shrink: 0; color: #efa8a8; }
+.conversation-table-head { margin-right: 48px; }
+.delete-conversation { color: #efa8a8; border-color: #9b5555; }

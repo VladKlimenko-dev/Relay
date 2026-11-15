@@ -41,7 +41,9 @@ function download(name: string, content: string, type = "text/markdown") {
   const a = document.createElement("a"); a.href = url; a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 function exportRun(run: Run) {
-  download(`relay-run-${run.id}.md`, `# Relay run ${run.id}\n\nMode: ${run.mode}\nStatus: ${run.status}\nProject: ${run.projectName}\nCreated: ${run.createdAt}\n\n## Request\n${run.request}\n\n${run.steps.map(s => `## ${s.title}\nAgent: ${s.role}\nStatus: ${s.status}\n\n${s.output || "No output."}`).join("\n\n")}\n\nNote: outputs are proposals. No code was executed by this runtime.`);
+  const messages = [...(run.turns || []), run].map((turn, index) =>
+    `## Message ${index + 1}\nStatus: ${turn.status}\n\n${turn.request}\n\n${turn.steps.map(s => `### ${s.title}\nAgent: ${s.role}\nStatus: ${s.status}\n\n${s.output || "No output."}`).join("\n\n")}`).join("\n\n");
+  download(`relay-run-${run.id}.md`, `# Relay conversation ${run.id}\n\nMode: ${run.mode}\nStatus: ${run.status}\nProject: ${run.projectName}\nCreated: ${run.createdAt}\n\n${messages}\n\nNote: outputs are proposals. No code was executed by this runtime.`);
 }
 function Badge({ children, kind = "" }: { children: any; kind?: string }) { return <span className={`badge ${kind}`}>{children}</span>; }
 function IconButton({ children, label, onClick, disabled = false, testid }: { children: any; label: string; onClick: () => void; disabled?: boolean; testid?: string }) { return <button type="button" data-testid={testid || `button-${label.toLowerCase().replaceAll(" ", "-")}`} className="icon-button" aria-label={label} title={label} onClick={onClick} disabled={disabled}>{children}</button>; }
@@ -73,6 +75,9 @@ function ControlRoom() {
   const [checking, setChecking] = useState(false);
   const [runSearch, setRunSearch] = useState("");
   const [runFilter, setRunFilter] = useState("all");
+  const [deleteTarget, setDeleteTarget] = useState<Run | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
   const chatForm = useForm({ defaultValues: { request: "" } });
   const request = chatForm.watch("request");
   const bottom = useRef<HTMLDivElement>(null);
@@ -101,7 +106,14 @@ function ControlRoom() {
   async function send(values: { request: string }) {
     if (values.request.trim().length < 3 || busy || working) return;
     setBusy(true); setError("");
-    try { const r = await json("POST", "/api/runs", { request: values.request, mode, projectId: selected?.id ?? null }); setRunId(r.id); chatForm.reset(); await invalidate(); }
+    try {
+      if (runId !== null && !activeRun) throw new Error("Wait for the current conversation to load before replying.");
+      const r = activeRun
+        ? await json("POST", `/api/runs/${activeRun.id}/messages`, { request: values.request, expectedTurn: activeRun.turns?.length || 0 })
+        : await json("POST", "/api/runs", { request: values.request, mode, projectId: selected?.id ?? null });
+      queryClient.setQueryData(["/api/runs", r.id], r);
+      setRunId(r.id); chatForm.reset(); await invalidate();
+    }
     catch (e: any) { setError(e.message); }
     finally { setBusy(false); }
   }
@@ -133,6 +145,23 @@ function ControlRoom() {
   useEffect(() => { json("GET", "/api/runtime").then(st => { setModelStatus(st); if (st?.connected) setMode("ollama"); }).catch(() => {}); }, []);
   function newTask() { restored.current = true; try { localStorage.removeItem("relay-selected-run"); } catch {} setRunId(null); setError(""); setMobileOpen(false); setPanel("activity"); chatForm.reset(); navigate("/"); window.scrollTo({ top: 0 }); }
   function openRun(id: number) { setRunId(id); setError(""); navigate("/"); }
+  function confirmDelete(run: Run) { setDeleteError(""); setDeleteTarget(run); }
+  async function deleteConversation() {
+    if (!deleteTarget || deleting) return;
+    const id = deleteTarget.id;
+    setDeleting(true); setDeleteError("");
+    try {
+      await json("DELETE", `/api/runs/${id}`);
+      await queryClient.cancelQueries({ queryKey: ["/api/runs"] });
+      queryClient.setQueryData<Run[]>(["/api/runs"], list => list?.filter(r => r.id !== id));
+      if (runId === id) { setRunId(null); setOutput(null); setPanel("activity"); chatForm.reset(); setError(""); }
+      try { if (localStorage.getItem("relay-selected-run") === String(id)) localStorage.removeItem("relay-selected-run"); } catch {}
+      queryClient.removeQueries({ queryKey: ["/api/runs", id], exact: true });
+      setDeleteTarget(null);
+      await queryClient.invalidateQueries({ queryKey: ["/api/runs"], exact: true });
+    } catch (e: any) { setDeleteError(e.message); }
+    finally { setDeleting(false); }
+  }
   function choosePrompt(text: string) { chatForm.setValue("request", text); document.getElementById("request")?.focus(); }
   const activeCount = agents.filter(a => a.enabled && a.role !== "orchestrator").length;
   const currentStep = activeRun?.steps.find(s => s.status === "running");
@@ -184,7 +213,7 @@ function ControlRoom() {
             {loadError && <div role="alert" className="error-banner">Could not load your workspace. <button onClick={() => invalidate()}>Try again</button></div>}
             {isLoading ? <div className="loading-workspace"><LoaderCircle className="spin"/>Loading your workspace…</div> : <div className="workspace-grid">
               <section className="chat-panel">
-                <div className="section-head"><div><MessageSquare size={16}/><h2>Conversation</h2></div><span className="small-muted">{activeRun ? `RUN ${String(activeRun.id).padStart(3, "0")}` : "New session"}</span></div>
+                <div className="section-head"><div><MessageSquare size={16}/><h2>Conversation</h2></div><div><span className="small-muted">{activeRun ? `RUN ${String(activeRun.id).padStart(3, "0")}` : "New session"}</span>{activeRun && <IconButton label="Delete conversation" testid="button-delete-current-conversation" disabled={busy || working || deleting} onClick={() => confirmDelete(activeRun)}><Trash2 size={16}/></IconButton>}</div></div>
                 <div className="chat-content">
                   {!activeRun ? <div className="welcome">
                     <div className="welcome-avatar"><AudioLines size={25}/></div><div className="assistant-label">RELAY ORCHESTRATOR</div>
@@ -197,7 +226,14 @@ function ControlRoom() {
                       { icon: Database, title: "Turn data into understanding", desc: "Generate a dataset and plan an analysis", prompt: "Generate a synthetic API performance dataset with 20 records, and write a Python script to analyze latency and errors. Clearly label synthetic data." },
                     ].map(s => <button data-testid={`suggest-${s.title.split(" ")[0].toLowerCase()}`} key={s.title} className="suggestion" onClick={() => choosePrompt(s.prompt)}><s.icon size={19}/><span><strong>{s.title}</strong><small>{s.desc}</small></span><ArrowUpRight size={15}/></button>)}
                   </div> : <div className="messages">
-                    <div className="user-message"><div className="message-meta"><span className="profile-avatar small">Y</span><strong>You</strong><time>{formatTime(activeRun.createdAt)}</time></div><p>{activeRun.request}</p></div>
+                    {activeRun.turns?.map((turn, index) => <div key={index} data-testid={`conversation-turn-${index}`}>
+                      <div className="user-message"><div className="message-meta"><span className="profile-avatar small">Y</span><strong>You</strong><time>{formatTime(turn.messageAt || turn.createdAt)}</time></div><p>{turn.request}</p></div>
+                      <div className="assistant-message"><div className="message-meta"><Network size={18} className="accent"/><strong>Previous response</strong><Badge>{statuses[turn.status]}</Badge></div>
+                        {turn.steps.some(step => step.output) ? turn.steps.filter(step => step.output).map((step, i) => <details key={i} className="settings-note"><summary>{step.title} · {step.role} · {statuses[step.status]}{step.status !== "complete" ? " (unfinished)" : ""}</summary><RichOutput text={step.output || ""}/></details>) : <p>No specialist output was generated for this message.</p>}
+                        {turn.error && <p className="small-muted">{turn.error}</p>}
+                      </div>
+                    </div>)}
+                    <div className="user-message"><div className="message-meta"><span className="profile-avatar small">Y</span><strong>You</strong><time>{formatTime(activeRun.messageAt || activeRun.createdAt)}</time></div><p>{activeRun.request}</p></div>
                     <div className="assistant-message"><div className="message-meta"><Network size={18} className="accent"/><strong>Orchestrator</strong><Badge kind={activeRun.mode === "demo" ? "amber" : "green"}>{activeRun.mode === "demo" ? "DEMO" : "LOCAL"}</Badge></div>
                       <p>{activeRun.status === "planning" ? "Your request is saved. The orchestrator is preparing a plan; you can pause and save at any time." : pausing ? "Saving the response and waiting for any in-flight action to settle…" : paused ? "Paused and saved locally. Resume this request now or after restarting Relay." : activeRun.status === "approval" ? "Here’s the plan. Review the handoffs, then give the team the go-ahead." : activeRun.status === "complete" ? "The team has finished. Your proposed outputs are ready to review." : activeRun.status === "running" ? "The team is working through the approved plan. Each agent receives the previous agent’s output." : stopped ? "Stopped and saved. Reopen this session after restarting Relay and choose Resume when ready." : "This run needs your attention."}</p>
                       {(paused || stopped) && <div role="status" data-testid={paused ? "pause-saved" : "stop-saved"} className="success-banner">{paused ? "Paused" : "Stopped"} and saved{activeRun.savedAt ? ` at ${formatTime(activeRun.savedAt)}` : ""} on the Relay server PC: <code>sessions/session-{activeRun.id}.json</code>. Prompts, source context, partial answers and progress are preserved. Resume uses saved text, not an exact model-state checkpoint.</div>}
@@ -212,9 +248,9 @@ function ControlRoom() {
                 </div>
                 <div className="composer-area">{error && <div className="error-banner" role="alert">{error}</div>}
                   <Form {...chatForm}><form onSubmit={chatForm.handleSubmit(send)} className="composer">
-                    <FormField control={chatForm.control} name="request" rules={{ minLength: 3 }} render={({ field }) => <FormItem><FormLabel className="sr-only">Your request</FormLabel><FormControl><textarea {...field} id="request" data-testid="input-request" placeholder="Describe what you want to build…&#10;You can write in English or Russian." rows={3} disabled={busy || working} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); chatForm.handleSubmit(send)(); } }}/></FormControl></FormItem>}/>
+                    <FormField control={chatForm.control} name="request" rules={{ minLength: 3 }} render={({ field }) => <FormItem><FormLabel className="sr-only">Your request</FormLabel><FormControl><textarea {...field} id="request" data-testid="input-request" placeholder={runId !== null ? "Reply in this conversation…\nUse New task to start a separate chat." : "Describe what you want to build…\nYou can write in English or Russian."} rows={3} disabled={busy || working} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); chatForm.handleSubmit(send)(); } }}/></FormControl></FormItem>}/>
                     <div className="composer-toolbar"><div><IconButton label="Import source files" onClick={() => setProjectModal(true)}><Paperclip size={17}/></IconButton><span className="composer-project"><Folder size={13}/>{selected?.repo ? `${selected.repo.fullName} · ${selected.repo.fileCount.toLocaleString("en-US")} files indexed` : `${selected?.files.length || 0} ${selected?.files.length === 1 ? "file" : "files"} in context`}</span></div>
-                      {working || paused || stopped ? <div className="generation-controls">
+                      {working || paused || (stopped && !request.trim()) ? <div className="generation-controls">
                         {paused || stopped ? <button type="button" data-testid="button-resume" className="send-button" aria-label="Resume saved response" title="Resume saved response" onClick={() => changeRun("resume")} disabled={busy}><Play size={18}/></button> :
                           <button type="button" data-testid="button-pause" className="send-button" aria-label="Pause and save response" title="Pause and save response" onClick={() => changeRun("pause")} disabled={busy || pausing}>{pausing ? <LoaderCircle size={18} className="spin"/> : <Pause size={18}/>}</button>}
                         {!stopped && <button type="button" data-testid="button-stop" className="stop-button" aria-label="Stop and save session" onClick={() => changeRun("cancel")} disabled={busy}><CircleStop size={16}/>Stop</button>}
@@ -247,7 +283,7 @@ function ControlRoom() {
           <Route path="/runs">
             <PageHeading eyebrow="EVERY HANDOFF, ACCOUNTED FOR" title="Run history" text="Review the requests, decisions, and outputs of your team." action={<button className="button primary" onClick={newTask}><Plus size={16}/>New task</button>}/>
             <div className="table-toolbar"><label className="search-input"><Search size={16}/><input data-testid="input-run-search" aria-label="Search runs" placeholder="Search requests…" value={runSearch} onChange={e => setRunSearch(e.target.value)}/></label><select data-testid="select-run-filter" aria-label="Filter runs by status" value={runFilter} onChange={e => setRunFilter(e.target.value)}><option value="all">All statuses</option>{["planning", "approval", "running", "pausing", "paused", "complete", "cancelled", "failed"].map(s => <option key={s} value={s}>{statuses[s]}</option>)}</select></div>
-            <div className="runs-table">{runs.filter(r => r.request.toLowerCase().includes(runSearch.toLowerCase()) && (runFilter === "all" || r.status === runFilter)).length ? <><div className="run-table-head"><span>REQUEST</span><span>STATUS</span><span>RUNTIME</span><span>CREATED</span><span/></div>{runs.filter(r => r.request.toLowerCase().includes(runSearch.toLowerCase()) && (runFilter === "all" || r.status === runFilter)).map(r => <button data-testid={`run-row-${r.id}`} key={r.id} className="run-row" onClick={() => openRun(r.id)}><span><strong>{r.request}</strong><small>{r.projectName} · {r.steps.length} agents · {r.mode === "demo" ? "Demo" : "Ollama"}</small></span><Badge kind={r.status === "complete" ? "green" : r.status === "failed" ? "red" : "amber"}>{statuses[r.status]}</Badge><span>{r.mode === "demo" ? "Demo" : "Ollama"}</span><time>{new Date(r.createdAt).toLocaleDateString()}<small>{formatTime(r.createdAt)}</small></time><ChevronRight size={16}/></button>)}</> : <div className="large-empty"><Clock3 size={30}/><h2>{runs.length ? "No matching runs" : "Your first run starts with an idea"}</h2><p>{runs.length ? "Try another search or status filter." : "Send a request in your workspace to start a traceable workflow."}</p><button className="button secondary" onClick={newTask}>Open workspace<ArrowRight size={15}/></button></div>}</div>
+            <div className="runs-table">{runs.filter(r => r.request.toLowerCase().includes(runSearch.toLowerCase()) && (runFilter === "all" || r.status === runFilter)).length ? <><div className="run-table-head conversation-table-head"><span>REQUEST</span><span>STATUS</span><span>RUNTIME</span><span>CREATED</span><span/></div>{runs.filter(r => r.request.toLowerCase().includes(runSearch.toLowerCase()) && (runFilter === "all" || r.status === runFilter)).map(r => <div key={r.id} className="conversation-history-row"><button data-testid={`run-row-${r.id}`} className="run-row" onClick={() => openRun(r.id)}><span><strong>{r.request}</strong><small>{r.projectName} · {r.steps.length} agents · {r.mode === "demo" ? "Demo" : "Ollama"}</small></span><Badge kind={r.status === "complete" ? "green" : r.status === "failed" ? "red" : "amber"}>{statuses[r.status]}</Badge><span>{r.mode === "demo" ? "Demo" : "Ollama"}</span><time>{new Date(r.createdAt).toLocaleDateString()}<small>{formatTime(r.createdAt)}</small></time><ChevronRight size={16}/></button><IconButton label={`Delete conversation ${r.id}`} testid={`button-delete-conversation-${r.id}`} disabled={busy || deleting || ["planning", "running", "pausing"].includes(r.status)} onClick={() => confirmDelete(r)}><Trash2 size={16}/></IconButton></div>)}</> : <div className="large-empty"><Clock3 size={30}/><h2>{runs.length ? "No matching runs" : "Your first run starts with an idea"}</h2><p>{runs.length ? "Try another search or status filter." : "Send a request in your workspace to start a traceable workflow."}</p><button className="button secondary" onClick={newTask}>Open workspace<ArrowRight size={15}/></button></div>}</div>
           </Route>
           <Route path="/evaluations">
             <PageHeading eyebrow="QUALITY IS MEASURED, NOT PROMISED" title="Evaluations" text="Your target: Opus 5.5-level programming on your own tasks." action={<button data-testid="button-export-evaluations" className="button secondary" onClick={() => download("relay-evaluations.csv", "task,language,candidate,reference,note\n" + evaluations.map(e => [e.name, e.language, e.candidate, e.reference, e.note].map(v => `"${v.replaceAll('"', '""')}"`).join(",")).join("\n"), "text/csv")}><Download size={15}/>Export CSV</button>}/>
@@ -272,6 +308,7 @@ function ControlRoom() {
         </Switch>
       </main>
     </div>
+    <Dialog open={!!deleteTarget} onOpenChange={open => { if (!open && !deleting) setDeleteTarget(null); }}><DialogContent className="app-dialog"><DialogTitle>Delete conversation?</DialogTitle><DialogDescription>This permanently removes all messages, outputs and the saved session file from the Relay server PC. Project files, repositories and changes already made on GitHub are not deleted. This cannot be undone.</DialogDescription><p>{deleteTarget?.request}</p>{deleteError && <div role="alert" className="error-banner">{deleteError}</div>}<div className="dialog-footer"><button type="button" className="button secondary" disabled={deleting} onClick={() => setDeleteTarget(null)}>Cancel</button><button type="button" data-testid="button-confirm-delete-conversation" className="button secondary delete-conversation" disabled={deleting} onClick={deleteConversation}><Trash2 size={16}/>{deleting ? "Deleting…" : "Delete conversation"}</button></div></DialogContent></Dialog>
     <ProjectDialog open={projectModal} onClose={() => setProjectModal(false)} onCreated={p => { setProjectId(p.id); setProjectModal(false); newTask(); }}/>
     <ImportGitHubDialog open={githubModal} onClose={() => setGithubModal(false)} onCreated={p => { setProjectId(p.id); setGithubModal(false); setRepoProjectId(p.id); }}/>
     {repoProjectId !== null && <RepoDialog project={projects.find(p => p.id === repoProjectId) || null} onClose={() => setRepoProjectId(null)}/>}

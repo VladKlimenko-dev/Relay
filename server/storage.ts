@@ -1,6 +1,6 @@
 import type { Agent, ProjectBody } from "@shared/schema";
 import { DatabaseSync } from "node:sqlite";
-import { readSessions, writeSession } from "./sessions";
+import { readSessions, writeSession, deleteSession } from "./sessions";
 
 // Built-in SQLite (Node >= 22.13): no native module to compile on Windows.
 const sqlite = new DatabaseSync(process.env.DATA_FILE || "data.db");
@@ -13,14 +13,21 @@ const q = {
   get: sqlite.prepare("SELECT * FROM records WHERE id = ?"),
   create: sqlite.prepare("INSERT INTO records (kind, data) VALUES (?, ?) RETURNING *"),
   update: sqlite.prepare("UPDATE records SET data = ? WHERE id = ? RETURNING *"),
+  delete: sqlite.prepare("DELETE FROM records WHERE id = ? AND kind = ?"),
 };
 export interface IStorage {
   list(kind: string): any[];
   get(id: number, kind: string): any | undefined;
   create(kind: string, data: unknown): any;
   update(id: number, data: unknown): any;
+  deleteRun(id: number): void;
 }
 class DatabaseStorage implements IStorage {
+  deleteRun(id: number) {
+    // Remove the restore copy first. On failure the database record remains available.
+    deleteSession(id);
+    q.delete.run(id, "run");
+  }
   list(kind: string) { return (q.list.all(kind) as Row[]).map(unpack); }
   get(id: number, kind: string) { const r = q.get.get(id) as Row | undefined; return r?.kind === kind ? unpack(r) : undefined; }
   create(kind: string, data: unknown) {

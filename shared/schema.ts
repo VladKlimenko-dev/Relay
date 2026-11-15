@@ -7,6 +7,7 @@ export type ModelRequest = { url: string; runtime: "openai" | "ollama"; body: Re
 export type RuntimeOptions = { runtime: "openai" | "ollama"; endpoint: string; modelOverride: string; context: number; maxTokens: number; think: boolean; keepAlive: string; timeoutMinutes: number; priorChars: number };
 export type Step = { role: Role; title: string; status: "queued" | "running" | "paused" | "complete" | "failed" | "cancelled"; output?: string; tokens?: number; elapsed?: number; modelRequest?: ModelRequest; lastRequest?: ModelRequest };
 export type RunBody = { request: string; mode: "demo" | "ollama"; projectId: number | null; projectName: string; status: "planning" | "approval" | "running" | "pausing" | "paused" | "complete" | "failed" | "cancelled"; steps: Step[]; events: { time: string; message: string }[]; createdAt: string; error?: string; context?: string; agents?: Agent[];
+  turns?: RunTurn[]; messageAt?: string;
   phase?: "planning" | "execution"; contextReady?: boolean; planningOutput?: string; savedAt?: string;
   plannerRequest?: ModelRequest; progress?: Record<string, any>; projectSnapshot?: Project;
   runtimeOptions?: RuntimeOptions;
@@ -28,6 +29,7 @@ export const insertRecordSchema = createInsertSchema(records).omit({ id: true })
 export type InsertRecord = z.infer<typeof insertRecordSchema>;
 export type RecordRow = typeof records.$inferSelect;
 export type Run = RunBody & { id: number };
+export type RunTurn = Omit<RunBody, "turns">;
 export type Project = ProjectBody & { id: number };
 export const sourceSchema = z.object({ name: z.string().min(1).max(220), content: z.string().max(80000) });
 export const projectSchema = z.object({ name: z.string().trim().min(1).max(80), description: z.string().max(500).default(""), language: z.string().max(50), files: z.array(sourceSchema).max(25).default([]) });

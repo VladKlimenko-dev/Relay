@@ -99,6 +99,7 @@ const repoProject = (id: number) => {
   return p;
 };
 
+export const applyingRuns = new Set<number>();
 export function registerGitHubRoutes(app: Express, busy: () => boolean) {
   const guardIdle = () => { if (busy()) throw new GitHubError("A run is being planned or executed. Wait for it to finish before changing files.", 409); };
 
@@ -211,6 +212,9 @@ export function registerGitHubRoutes(app: Express, busy: () => boolean) {
 
   // ---- change workflow
   app.post("/api/runs/:id/apply", async (req, res) => {
+    const id = Number(req.params.id);
+    if (applyingRuns.has(id)) return res.status(409).json({ message: "Changes are already being applied for this conversation." });
+    applyingRuns.add(id);
     try {
       guardIdle();
       const run = storage.get(Number(req.params.id), "run");
@@ -228,6 +232,7 @@ export function registerGitHubRoutes(app: Express, busy: () => boolean) {
       storage.update(run.id, run); reindex(p);
       res.json(run.applied);
     } catch (e) { fail(res, e); }
+    finally { applyingRuns.delete(id); }
   });
   app.get("/api/projects/:id/changes", async (req, res) => {
     try { const p = repoProject(Number(req.params.id)); res.json(await status(repoDir(p.repo), p.repo.branch)); } catch (e) { fail(res, e); }

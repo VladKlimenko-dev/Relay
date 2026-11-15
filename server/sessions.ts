@@ -6,6 +6,9 @@ import type { Run } from "@shared/schema";
 export const sessionDirectory = path.join(path.dirname(path.resolve(process.env.DATA_FILE || "data.db")), "sessions");
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
 export const sessionPath = (id: number) => path.join(sessionDirectory, `session-${id}.json`);
+export function deleteSession(id: number) {
+  fs.rmSync(sessionPath(id), { force: true });
+}
 export function writeSession(run: Run) {
   const raw = JSON.stringify(run);
   const document = JSON.stringify({ format: "relay-session", version: 1, checksum: digest(raw), run }, null, 2);
