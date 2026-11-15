@@ -61,6 +61,7 @@ const visibleText = (t: string) => t.replace(/<think>[\s\S]*?(?:<\/think>|$)/gi,
 type Progress = { label: string; phase: "waiting" | "prompt" | "thinking" | "writing"; startedAt: number; firstTokenAt?: number;
   promptTotal?: number; promptDone?: number; thinkTokens: number; outTokens: number; tail: string };
 let progress: Progress | null = null;
+export const systemActivity = () => ({ active: busy(), phase: busy() ? progress?.phase || "working" : "idle" });
 const startProgress = (label: string) => { progress = { label, phase: "waiting", startedAt: Date.now(), thinkTokens: 0, outTokens: 0, tail: "" }; };
 function onDelta(kind: "thinking" | "writing", piece: string) {
   if (!progress || !piece) return;

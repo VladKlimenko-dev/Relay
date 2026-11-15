@@ -5,6 +5,7 @@ import { QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { apiRequest, queryClient } from "./lib/queryClient";
 import { AccessGate } from "./AccessGate";
 import { RemoteSettings } from "./RemoteSettings";
+import { SystemStatus } from "./SystemStatus";
 import { useForm } from "react-hook-form";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
@@ -175,7 +176,7 @@ function ControlRoom() {
       </div>
     </aside>
     <div className="main-shell">
-      <header className="topbar"><div className="breadcrumb"><IconButton label="Open navigation" onClick={() => setMobileOpen(true)}><Menu className="mobile-menu" size={19}/></IconButton><span>Personal workspace</span><ChevronRight size={14}/><strong>{pageName}</strong></div><div className="topbar-right"><span className="review-mode"><ShieldCheck size={14}/>Review-first</span><button data-testid="button-runtime-header" className="runtime-pill" onClick={() => navigate("/settings")}><span className={`dot ${mode === "demo" ? "amber" : ""}`}/>{mode === "demo" ? "Demo mode" : "Local model"}<ChevronDown size={12}/></button></div></header>
+      <header className="topbar"><div className="breadcrumb"><IconButton label="Open navigation" onClick={() => setMobileOpen(true)}><Menu className="mobile-menu" size={19}/></IconButton><span>Personal workspace</span><ChevronRight size={14}/><strong>{pageName}</strong></div><div className="topbar-right"><span className="review-mode"><ShieldCheck size={14}/>Review-first</span><SystemStatus/><button data-testid="button-runtime-header" className="runtime-pill" onClick={() => navigate("/settings")}><span className={`dot ${mode === "demo" ? "amber" : ""}`}/>{mode === "demo" ? "Demo mode" : "Local model"}<ChevronDown size={12}/></button></div></header>
       <main id="main" tabIndex={-1} className={`main ${location === "/" ? "workspace-main" : ""}`}>
         <Switch>
           <Route path="/">

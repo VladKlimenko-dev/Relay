@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Globe, LoaderCircle, RefreshCw, ShieldCheck } from "lucide-react";
 import { apiRequest } from "./lib/queryClient";
+import { remoteAccessRequirements } from "@shared/remoteAccessValidation";
 
 type Status = {
   computerName: string; platform: string; localSetupAllowed: boolean; localAddresses: string[];
@@ -23,6 +24,8 @@ export function RemoteSettings() {
   const [confirmEnable, setConfirmEnable] = useState(false), [renew, setRenew] = useState(false);
   const [busy, setBusy] = useState(false), [note, setNote] = useState(""), [error, setError] = useState("");
   const initialized = useRef(false), editedAddress = useRef(false);
+  const requirements = remoteAccessRequirements({ username, address, port, password, confirmation, current,
+    configured: !!status?.configured, confirmEnable });
   useEffect(() => {
     if (!status || initialized.current) return;
     initialized.current = true; setUsername(status.username); setPort(status.port);
@@ -32,7 +35,9 @@ export function RemoteSettings() {
     if (status && !status.configured && !editedAddress.current && publicIp?.ip && !publicIp.stale) setAddress(publicIp.ip);
   }, [status, publicIp]);
   async function save(e: React.FormEvent) {
-    e.preventDefault(); setBusy(true); setError(""); setNote("");
+    e.preventDefault();
+    if (busy || requirements.length) return;
+    setBusy(true); setError(""); setNote("");
     try {
       const result = await (await apiRequest("POST", "/api/remote/settings", {
         username: username.trim(), address: address.trim(), port, password, confirmPassword: confirmation,
@@ -89,7 +94,10 @@ export function RemoteSettings() {
         {confirmation && confirmation !== password && <p role="alert" className="small-muted">Passwords do not match.</p>}
         {status.configured && <label className="check"><input type="checkbox" checked={renew} onChange={e => setRenew(e.target.checked)}/>Generate a new self-signed certificate (requires trusting it again; IPv4 only)</label>}
         <label className="check"><input type="checkbox" required checked={confirmEnable} onChange={e => setConfirmEnable(e.target.checked)}/>Enable HTTPS owner access after restart. This account controls all Relay projects and connected GitHub access.</label>
-        <div className="connection-row"><button data-testid="save-remote-access" className="button primary" disabled={busy || !confirmEnable || password.length < 15 || password !== confirmation}>
+        <div id="remote-save-requirements" className="settings-note" role="status" aria-live="polite">
+          {busy ? "Saving remote access and preparing the HTTPS certificate…" : requirements.length ? <><p>Before you can save:</p><ul style={{ paddingLeft: 20, listStyle: "disc" }}>{requirements.map(reason => <li key={reason}>{reason}</li>)}</ul></> : "All form requirements are met. You can save remote access."}
+        </div>
+        <div className="connection-row"><button data-testid="save-remote-access" aria-describedby="remote-save-requirements" className="button primary" disabled={busy || requirements.length > 0}>
           {busy ? <LoaderCircle size={15} className="spin"/> : <Globe size={15}/>}Save remote access</button></div>
       </fieldset>
     </form> : status && <p className="settings-note">To create or change this login, open Settings locally on the Windows PC running Relay using its localhost address. Credentials cannot be changed from a remote connection.</p>}

@@ -23,6 +23,9 @@ $ErrorActionPreference = "Continue"
 try { [Console]::OutputEncoding = [System.Text.Encoding]::UTF8; $OutputEncoding = [System.Text.Encoding]::UTF8 } catch { }
 $Root = Split-Path -Parent $PSScriptRoot
 . (Join-Path $PSScriptRoot "models.ps1")
+. (Join-Path $PSScriptRoot "background-process.ps1")
+$LogDir = Join-Path $Root "logs"
+$null = New-Item -ItemType Directory -Force -Path $LogDir
 function Fail($text) { Write-Host "START STOPPED: $text" -ForegroundColor Red; exit 1 }
 function Up($url) {
   # Plain HTTP request with no proxy: a system proxy can swallow 127.0.0.1 requests in Windows PowerShell 5.1.
@@ -75,13 +78,16 @@ if ($Runtime -eq "llamacpp") {
     if ($KvInRam) { $llamaArgs += "-nkvo" }  # weights stay in VRAM, context cache and attention go to RAM/CPU
     # With several GPUs (e.g. Arc + NVIDIA), pin llama.cpp to the Arc card so the model is not split across PCIe.
     if ($arc) { $dev = ($arc.Trim() -split ":")[0]; $llamaArgs += @("-dev", $dev); Write-Host "Using $($arc.Trim())" }
-    Write-Host "Starting llama-server ($($spec.File), context $Ctx) in a new window..."
-    Start-Process -FilePath $server -ArgumentList $llamaArgs -WorkingDirectory (Split-Path $server)
+    Write-Host "Starting llama-server ($($spec.File), context $Ctx) in the background..."
+    Backup-RelayLogs $LogDir "model"
+    $modelProcess = Start-Process -FilePath $server -ArgumentList $llamaArgs -WorkingDirectory (Split-Path $server) -WindowStyle Hidden -PassThru -ErrorAction Stop `
+      -RedirectStandardOutput (Join-Path $LogDir "model.stdout.log") -RedirectStandardError (Join-Path $LogDir "model.stderr.log")
+    Save-RelayProcess $Root ".relay-model.json" $modelProcess
     $deadline = (Get-Date).AddMinutes(15)
-    Write-Host "Waiting for llama-server to load the model (watch its window)..."
+    Write-Host "Waiting for the model to load. Diagnostics: logs\model.stderr.log"
     while (-not (Up "http://127.0.0.1:$LlamaPort/health")) {
-      if ((Get-Date) -gt $deadline) { Fail "llama-server did not become ready in 15 minutes. Check its window for errors." }
-      if (-not (Get-Process -Name "llama-server" -ErrorAction SilentlyContinue)) { Fail "llama-server exited. Check its window; try a smaller -Ctx." }
+      if ((Get-Date) -gt $deadline) { Fail "llama-server did not become ready in 15 minutes. Check logs\model.stderr.log." }
+      if ($modelProcess.HasExited) { Fail "llama-server exited. Check logs\model.stderr.log; try a smaller -Ctx." }
       Start-Sleep -Seconds 3
     }
   }
@@ -94,9 +100,12 @@ if ($Runtime -eq "llamacpp") {
     $env:OLLAMA_KV_CACHE_TYPE = "q8_0"
     $env:OLLAMA_VULKAN = "1"
     Write-Host "Starting Ollama server..."
-    Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden
+    Backup-RelayLogs $LogDir "model"
+    $modelProcess = Start-Process -FilePath "ollama" -ArgumentList "serve" -WindowStyle Hidden -PassThru -ErrorAction Stop `
+      -RedirectStandardOutput (Join-Path $LogDir "model.stdout.log") -RedirectStandardError (Join-Path $LogDir "model.stderr.log")
+    Save-RelayProcess $Root ".relay-model.json" $modelProcess
     $deadline = (Get-Date).AddMinutes(1)
-    Write-Host "Waiting for llama-server to load the model (watch its window)..."
+    Write-Host "Waiting for Ollama. Diagnostics: logs\model.stderr.log"
     while (-not (Up "http://127.0.0.1:11434/api/tags")) { if ((Get-Date) -gt $deadline) { Fail "Ollama did not start." }; Start-Sleep -Seconds 2 }
   } else {
     Write-Host "Ollama already running. For best memory use set OLLAMA_FLASH_ATTENTION=1 and OLLAMA_KV_CACHE_TYPE=q8_0 in Windows environment variables and restart Ollama." -ForegroundColor Yellow
@@ -110,17 +119,20 @@ $env:HOST = "127.0.0.1"
 $env:DATA_FILE = Join-Path $Root "data.db"
 $env:RELAY_CTX = "$Ctx"
 $env:RELAY_MODEL = $spec.OllamaTag
-Write-Host "Relay: http://127.0.0.1:$Port  (runtime $Runtime, model $($spec.OllamaTag)). Close this window or press Ctrl+C to stop Relay." -ForegroundColor Green
-$node = Start-Process -FilePath "node" -ArgumentList "dist\index.cjs" -WorkingDirectory $Root -NoNewWindow -PassThru
+$env:RELAY_BACKGROUND = "1"
+Write-Host "Relay: http://127.0.0.1:$Port  (runtime $Runtime, model $($spec.OllamaTag)). Starting in the background." -ForegroundColor Green
+Backup-RelayLogs $LogDir "relay"
+$node = Start-Process -FilePath "node" -ArgumentList "dist\index.cjs" -WorkingDirectory $Root -WindowStyle Hidden -PassThru -ErrorAction Stop `
+  -RedirectStandardOutput (Join-Path $LogDir "relay.stdout.log") -RedirectStandardError (Join-Path $LogDir "relay.stderr.log")
 $null = $node.Handle   # keep the handle so ExitCode is available if node exits
 try {
-  @{ pid=$node.Id; startedAt=$node.StartTime.ToUniversalTime().ToString("o") } | ConvertTo-Json |
+  @{ pid=$node.Id; startedAt=$node.StartTime.ToUniversalTime().ToString("o"); port=$Port } | ConvertTo-Json |
     Set-Content -LiteralPath (Join-Path $Root ".relay-server.json") -Encoding UTF8
 } catch { Write-Host "Could not save the server process marker; update checks will use the local health endpoint." -ForegroundColor Yellow }
 $deadline = (Get-Date).AddMinutes(2)
 while (-not (Up "http://127.0.0.1:$Port/api/health")) {
-  if ($node.HasExited) { Fail "Relay server exited (code $($node.ExitCode)). See the messages above." }
-  if ((Get-Date) -gt $deadline) { Fail "Relay server did not answer on port $Port in 2 minutes. See the messages above." }
+  if ($node.HasExited) { Fail "Relay server exited (code $($node.ExitCode)). See logs\relay.stderr.log." }
+  if ((Get-Date) -gt $deadline) { Fail "Relay server did not answer on port $Port in 2 minutes. See logs\relay.stderr.log." }
   Start-Sleep -Seconds 1
 }
 $openUrl = "http://127.0.0.1:$Port"
@@ -131,5 +143,5 @@ if (Test-Path (Join-Path $Root "remote-access.json")) {
 }
 Write-Host "Relay is ready: $openUrl" -ForegroundColor Green
 if (-not $NoBrowser) { Start-Process $openUrl }
-$node.WaitForExit()
-Remove-Item -LiteralPath (Join-Path $Root ".relay-server.json") -Force -ErrorAction SilentlyContinue
+Write-Host "Relay is running in the background. Use Status in the app to view logs or shut down. Closing the browser does not stop Relay." -ForegroundColor Green
+exit 0

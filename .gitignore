@@ -30,5 +30,7 @@ sessions/
 .relay-version.json
 .relay-update-pending.json
 .relay-server.json
+.relay-model.json
+logs/
 __pycache__/
 *.pyc

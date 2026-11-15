@@ -95,6 +95,12 @@ Streaming text is also checkpointed periodically. After an unexpected process ex
 
 ### Single launcher and GitHub updates
 
+Relay and llama.cpp/Ollama now run as hidden background processes. The startup console closes automatically after a successful launch; setup/update progress and startup failures remain visible when needed. Click **Status** in the app header to inspect server uptime, activity, server RAM, model connectivity and recent logs. Closing the browser does not stop Relay; running `start-relay.cmd` again opens the existing instance instead of starting a duplicate.
+
+Use **Status → Shut down Relay → Confirm shutdown** on the host PC before applying updates. Shutdown is blocked while a task or API write is active; pause/stop the task and wait for it to save first. Only a model process started and recorded by this installation is stopped. Externally started models are left running. Saved sessions and settings remain untouched.
+
+Diagnostics are written to `logs/relay.stdout.log`, `logs/relay.stderr.log`, `logs/model.stdout.log` and `logs/model.stderr.log` on the server PC. The previous launch's logs are retained with a `.previous` suffix; logs are excluded from GitHub. The status viewer shows a bounded tail and redacts common credential patterns, but logs may still contain sensitive project details. Raw logs and shutdown are local-only; remote signed-in users can view health/status.
+
 The application source is maintained at [VladKlimenko-dev/Relay](https://github.com/VladKlimenko-dev/Relay). Double-click `start-relay.cmd` for the complete flow: check prerequisites, run setup when required, check the repository's `main` branch, rebuild changed application code, then start the model and Relay. Existing valid models are reused; an application update does not replace models, sessions, databases, workspace, credentials or runtime settings.
 
 - `start-relay.cmd -Setup`: explicitly run setup/repair, keeping the configured model/runtime unless you override them.

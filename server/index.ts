@@ -1,13 +1,14 @@
 import "dotenv/config";
 import express, { Response, NextFunction } from 'express';
 import type { Request } from 'express';
-import { registerRoutes } from "./routes";
+import { registerRoutes, systemActivity } from "./routes";
 import { serveStatic } from "./static";
 import { createServer } from "node:http";
 import { createServer as createHttpsServer } from "node:https";
 import fs from "node:fs";
 import { readAccess, registerAccess } from "./access";
 import { registerRemoteSettings } from "./remoteSettings";
+import { registerSystemStatus } from "./systemStatus";
 
 const app = express();
 const httpServer = createServer(app);
@@ -69,6 +70,7 @@ app.use((req, res, next) => {
 });
 
 (async () => {
+  registerSystemStatus(app, systemActivity);
   registerRemoteSettings(app, access, port);
   await registerRoutes(httpServer, app);
 

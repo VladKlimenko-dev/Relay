@@ -13,7 +13,24 @@ try {
   . (Join-Path $PSScriptRoot "models.ps1")
   . (Join-Path $PSScriptRoot "github-update-files.ps1")
   if ($Offline -and $UpdateOnly) { throw "Choose either -Offline or -UpdateOnly." }
-  if (Test-RelayServerRunning $Root $Port) { throw "Relay is already running. Use its existing window; stop the server before updating or running setup." }
+  if (Test-RelayServerRunning $Root $Port) {
+    if ($Setup -or $UpdateOnly -or $Toolchains -or $UpdateLlama) {
+      throw "Relay is already running. Open Status in the app and shut down before updating or running setup."
+    }
+    $url = "http://127.0.0.1:$Port"
+    $marker = Join-Path $Root ".relay-server.json"
+    if (Test-Path -LiteralPath $marker) {
+      $saved = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
+      if ($saved.port) { $url = "http://127.0.0.1:$($saved.port)" }
+    }
+    if (Test-Path -LiteralPath (Join-Path $Root "remote-access.json")) {
+      $remote = Get-Content -LiteralPath (Join-Path $Root "remote-access.json") -Raw | ConvertFrom-Json
+      $url = "https://127.0.0.1:$($remote.port)"
+    }
+    if (-not $NoBrowser) { Start-Process $url }
+    Write-Host "Relay is already running. Use Status in the app to inspect it or shut down."
+    exit 0
+  }
   $configFile = Join-Path $Root "relay-config.json"
   $config = $null
   if (Test-Path -LiteralPath $configFile) { $config = Get-Content -LiteralPath $configFile -Raw | ConvertFrom-Json }
