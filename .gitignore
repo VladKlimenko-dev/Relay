@@ -1,0 +1,34 @@
+node_modules/
+dist/
+.vite/
+
+# SQLite database files — never commit; exposes demo data at rest
+data.db
+data.db-shm
+data.db-wal
+data.db-journal
+
+.env
+.env.*
+!.env.example
+
+*.log
+.DS_Store
+tools/
+models/
+relay-config.json
+
+# Local data: cloned repositories, encrypted tokens, search settings
+workspace/
+secrets/
+search-settings.json
+remote-access.json
+relay-public.cer
+*.pfx
+*.pem
+sessions/
+.relay-version.json
+.relay-update-pending.json
+.relay-server.json
+__pycache__/
+*.pyc
