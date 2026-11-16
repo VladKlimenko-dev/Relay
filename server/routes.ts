@@ -522,7 +522,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     let sourceContext = "", contextNote = "";
     try {
       // "List all MD files in <GitHub repo>": answered from the real Git tree by the backend, no model plan.
-      const target = input.data.mode !== "demo" && !run.contextReady ? inventoryTarget(input.data.request, project?.repo) : null;
+      // Checked on every (re)plan, also after a pause once source context was saved.
+      const target = inventoryFor(run);
       if (target) return await answerInventory(run, target);
       const history = conversationContext(run.turns || [], Math.floor(SOURCE_CHARS / 3));
       // Uploaded files of this conversation and named files from registered local folders (server PC only).
@@ -619,6 +620,18 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
       }
     } finally { finishWork(run); }
   }
+  // Read-only "list files" requests never run a model plan, including plans saved by older versions or before a pause.
+  function inventoryFor(run: Run): InventoryTarget | null {
+    if (run.mode === "demo" || run.gitActions?.length) return null;
+    const project = run.projectId ? storage.get(run.projectId, "project") || run.projectSnapshot : undefined;
+    return inventoryTarget(run.request, project?.repo);
+  }
+  function replaceStalePlan(run: Run, target: InventoryTarget, controller: AbortController) {
+    run.status = "running"; run.phase = "execution"; run.error = undefined;
+    run.events.push(event(`Saved model plan not used: this read-only file listing is answered from the GitHub file tree${run.steps.length ? ` (${run.steps.length} planned step(s) skipped)` : ""}.`));
+    saveRun(run);
+    void (async () => { try { if (!controller.signal.aborted) await answerInventory(run, target); } finally { finishWork(run); } })();
+  }
   async function answerInventory(run: Run, target: InventoryTarget) {
     const name = `${target.owner}/${target.repo}`;
     run.events.push(event(`GitHub: reading the file tree of ${name}${target.branch ? ` (${target.branch})` : " (default branch)"}, read-only${target.fromUrl ? ", from the URL in the request" : ", the linked repository"}.`));
@@ -697,6 +710,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     if (busy()) return res.status(409).json({ message: "Another task is active. Wait for it to finish or stop it." });
     const controller = new AbortController(); controllers.set(id, controller);
     liveRuns.set(id, run);
+    const target = inventoryFor(run);
+    if (target) { replaceStalePlan(run, target, controller); return res.json(publicRun(run)); }
     run.status = "running"; run.phase = "execution"; run.events.push(event("Plan approved. Sequential execution started."));
     storage.update(id, run); res.json(publicRun(run)); void execute(id, controller);
   });
@@ -739,6 +754,8 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     // A discarded plan (including older stopped sessions without a phase) must not bypass approval.
     if (run.phase !== "execution") run.phase = "planning";
     const controller = new AbortController(); controllers.set(id, controller); liveRuns.set(id, run);
+    const target = run.phase === "execution" ? inventoryFor(run) : null;
+    if (target) { replaceStalePlan(run, target, controller); return res.json(publicRun(run)); }
     run.status = run.phase === "planning" ? "planning" : "running"; run.error = undefined;
     run.events.push(event(run.phase === "planning" ? "Resumed saved request. Rebuilding the incomplete plan; approval is still required." : "Resumed from saved response. Completed agents and GitHub actions will not be repeated."));
     saveRun(run); res.json(publicRun(run));

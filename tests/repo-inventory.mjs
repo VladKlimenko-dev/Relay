@@ -73,6 +73,15 @@ const db = new DatabaseSync(path.join(temp, "data.db"));
 db.exec("CREATE TABLE records (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, data TEXT NOT NULL)");
 const linked = { fullName: "someone/other", owner: "someone", name: "other", branch: "dev", dir: path.join(temp, "ws"), commit: "old", indexedAt: "2026-01-01T00:00:00Z", fileCount: 0, totalBytes: 0, skipped: [] };
 db.prepare("INSERT INTO records(kind,data) VALUES(?,?)").run("project", JSON.stringify({ name: "Linked", language: "Mixed", description: "", files: [], repo: linked }));
+// Saved runs from older versions / before a pause: an architect plan for the listing must not run (ids 2-5).
+const MD_LINK = "Check the repo at web address [https://github.com/VladKlimenko-dev/parametric3d-rep](https://github.com/VladKlimenko-dev/parametric3d-rep) and list all MD-files.";
+const archAgents = [{ role: "orchestrator", name: "Orchestrator", model: "m", enabled: true, prompt: "orchestrate the work" }, { role: "architect", name: "Architect", model: "m", enabled: true, prompt: "design the solution" }];
+const stale = (extra, request = MD_LINK) => db.prepare("INSERT INTO records(kind,data) VALUES(?,?)").run("run", JSON.stringify({ request, mode: "ollama", projectId: null, projectName: "General", agents: archAgents,
+  steps: [{ role: "architect", title: "Define the plan to list all MD-files in the Parametric3D repository", status: "queued" }], events: [], createdAt: "2026-11-01T00:00:00Z", context: "FastAPI service from an earlier message", contextReady: true, ...extra }));
+stale({ status: "approval", phase: "planning" });                                   // 2: approve an old plan
+stale({ status: "paused", phase: "execution" });                                    // 3: resume an approved plan
+stale({ status: "paused", phase: "planning" });                                     // 4: resume planning after context was saved
+stale({ status: "paused", phase: "execution" }, "Implement a STEP parser for the kernel with tests."); // 5: real coding plan keeps running
 db.close();
 fs.mkdirSync(path.join(temp, "secrets"), { recursive: true });
 
@@ -125,6 +134,21 @@ try {
   assert.equal(f.turns[0].inventory.repo, "VladKlimenko-dev/parametric3d-rep", "prior source history kept");
   assert.ok(calls.some(c => c.url === "/repos/someone/other/git/trees/sub1"), "walked directory after truncation");
 
+  // 3b) saved stale plans: Start and Resume answer from the GitHub tree; a real coding plan still executes
+  prompts.length = 0;
+  for (const [id, route] of [[2, "start"], [3, "resume"], [4, "resume"]]) {
+    const r = await call(`/api/runs/${id}/${route}`, {}); assert.equal(r.status, 200, JSON.stringify(r.data));
+    const s = await settle(id);
+    assert.equal(s.status, "complete", `${id}: ${s.error}`); assert.equal(s.steps.length, 0, `${id}: stale plan dropped`);
+    assert.equal(s.inventory.repo, "VladKlimenko-dev/parametric3d-rep"); assert.equal(s.inventory.total, 3);
+    assert.doesNotMatch(s.inventory.text, /FastAPI|Implementation Specification/);
+  }
+  assert.equal(prompts.length, 0, "no model call for stale listing plans");
+  assert.equal((await call("/api/runs/5/resume", {})).status, 200);
+  const coding = await wait(async () => { const r = (await call("/api/runs/5")).data; return ["complete", "failed"].includes(r.status) && r; }, "coding resume");
+  assert.equal(coding.inventory, undefined); assert.equal(coding.steps[0].status, "complete"); assert.ok(prompts.length >= 1, "coding plan executed");
+  prompts.length = 0;
+
   // 4) inaccessible repository and rate limit: real GitHub errors, not "no internet"
   const missing = await settle((await call("/api/runs", { request: "List all MD files in https://github.com/ghost/private-repo", mode: "ollama", projectId: general.id })).data.id);
   assert.equal(missing.status, "failed"); assert.match(missing.error, /GitHub 404.*not accessible with the saved GitHub token/);
@@ -156,7 +180,7 @@ try {
   const code = await settle((await call("/api/runs", { request: "Implement a STEP parser for the kernel with tests.", mode: "ollama", projectId: null })).data.id);
   assert.equal(code.status, "approval"); assert.deepEqual(code.steps.map(s => s.role), ["coder", "tester"]); assert.equal(code.answer, undefined);
   assert.equal(prompts.length, 1, "nothing executed before approval");
-  console.log("PASS: exact request listed real nested .md/.MD paths with branch/commit and downloadable file; URL overrides linked project without relinking; linked repo + truncated tree walk on follow-up; 404/rate-limit errors surfaced; non-GitHub hosts ignored; orchestrator routing: simple question = one direct answer with zero specialist calls, answer-only skips the planner, coding request keeps selected specialists and approval.");
+  console.log("PASS: exact request listed real nested .md/.MD paths with branch/commit and downloadable file; URL overrides linked project without relinking; saved stale listing plans (approve, resume execution, resume planning) answered from the tree with no model call while a stale coding plan still executes; linked repo + truncated tree walk on follow-up; 404/rate-limit errors surfaced; non-GitHub hosts ignored; orchestrator routing: simple question = one direct answer with zero specialist calls, answer-only skips the planner, coding request keeps selected specialists and approval.");
 } finally {
   if (server?.exitCode === null) server.kill("SIGTERM");
   gh.close(); model.close();
