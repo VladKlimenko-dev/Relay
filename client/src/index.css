@@ -165,3 +165,5 @@ button,input,textarea,select{font:inherit}button,a,input,textarea,select{-webkit
 .source-file .icon-button{width:28px;height:28px;min-width:28px;min-height:28px}
 .folder-add{display:flex;gap:6px;margin-top:4px}.folder-add input{flex:1;min-width:0;font-size:12px}
 .inference-device{display:flex;flex-direction:column;gap:4px;padding:var(--space-4) 0}.inference-device strong{font-size:14px}.inference-device p,.inference-device small{color:var(--muted);font-size:12px}
+.answer-card, .inventory-card { padding: 12px 14px; }
+.answer-label { display: block; color: var(--muted, #8a8f98); margin-bottom: 6px; font-size: 11px; letter-spacing: .02em; }

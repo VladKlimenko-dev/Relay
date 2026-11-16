@@ -9,6 +9,7 @@ let active = 0;
 http.createServer(async (req, res) => {
   if (req.url === "/api/tags") return res.end(JSON.stringify({ models: [{ name: "qa-fixture:1b" }] }));
   if (req.url === "/v1/models") return res.end(JSON.stringify({ data: [{ id: "qa-fixture:1b" }] }));
+  if (req.url === "/api/ps") return res.end(JSON.stringify({ models: [] }));
   let raw = ""; for await (const chunk of req) raw += chunk;
   const body = JSON.parse(raw);
   const openai = req.url === "/v1/chat/completions";

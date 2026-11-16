@@ -18,7 +18,7 @@ export function conversationContext(turns: RunTurn[], budget: number): string {
     const outputs = turn.steps.filter(step => step.output).map(step =>
       `${step.role} (${step.status}${step.status === "complete" ? "" : ", unfinished"}):\n${step.output}`).join("\n\n");
     const actions = (turn.gitActions || []).map(action => `Historical GitHub action ${action.type}: ${action.status || "queued"}; ${action.result || "no result"}`).join("\n");
-    const body = `${outputs || "No specialist output."}${actions ? `\n${actions}` : ""}${turn.error ? `\nError: ${turn.error}` : ""}`;
+    const body = `${turn.inventory ? `${turn.inventory.text}\n` : ""}${turn.answer ? `Direct answer:\n${turn.answer.text}\n` : ""}${outputs || (turn.inventory || turn.answer ? "" : "No specialist output.")}${actions ? `\n${actions}` : ""}${turn.error ? `\nError: ${turn.error}` : ""}`;
     const room = Math.max(0, remaining - header.length - 35);
     const excerpt = body.length > room ? `[Earlier output omitted]\n${body.slice(-room)}` : body;
     const entry = (header + excerpt).slice(0, remaining);

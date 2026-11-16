@@ -4,6 +4,9 @@ import { readSessions, writeSession, deleteSession } from "./sessions";
 
 // Built-in SQLite (Node >= 22.13): no native module to compile on Windows.
 const sqlite = new DatabaseSync(process.env.DATA_FILE || "data.db");
+// Keep a strong reference: on some Node 22 builds a collected DatabaseSync finalizes its prepared statements
+// ("statement has been finalized") while they are still in use.
+(globalThis as any).__relaySqlite = sqlite;
 sqlite.exec("PRAGMA journal_mode = WAL");
 sqlite.exec("CREATE TABLE IF NOT EXISTS records (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL, data TEXT NOT NULL)");
 type Row = { id: number; kind: string; data: string };

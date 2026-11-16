@@ -9,6 +9,8 @@ export type Step = { role: Role; title: string; status: "queued" | "running" | "
 export type RunBody = { request: string; mode: "demo" | "ollama"; projectId: number | null; projectName: string; status: "planning" | "approval" | "running" | "pausing" | "paused" | "complete" | "failed" | "cancelled"; steps: Step[]; events: { time: string; message: string }[]; createdAt: string; error?: string; context?: string; agents?: Agent[];
   turns?: RunTurn[]; messageAt?: string; title?: string; archived?: boolean;
   connectorSources?: { repo: string; branch: string; path: string; url: string }[];
+  route?: "direct" | "plan"; answer?: { text: string; status: "running" | "complete"; tokens?: number; elapsed?: number }; answerRequest?: ModelRequest;
+  inventory?: { repo: string; branch: string; commit: string; exts: string[]; total: number; treeFiles: number; partial: boolean; text: string };
   localSources?: { folderId: number; root: string; path: string; kind: "listing" | "file"; bytes?: number }[];
   phase?: "planning" | "execution"; contextReady?: boolean; planningOutput?: string; savedAt?: string;
   plannerRequest?: ModelRequest; progress?: Record<string, any>; projectSnapshot?: Project;
