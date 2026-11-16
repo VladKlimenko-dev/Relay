@@ -31,19 +31,24 @@ export function parseGitHubUrl(text: string): { owner: string; repo: string; bra
 const NOT_EXT = new Set(["all", "the", "of", "source", "code", "these", "those", "project", "repo", "repository", "text", "list", "my", "any",
   "some", "every", "new", "changed", "modified", "important", "relevant", "other", "such", "which", "what", "and", "or", "binary", "large", "test", "tests"]);
 const LIST = /\b(list|show|enumerate|find|count|give me|what are|which)\b|перечисл|покажи|список|найди|выведи|какие/i;
-const WRITE = /\b(fix|implement|change|refactor|rewrite|write|create|add|delete|remove|update|edit|rename|move|merge|close|commit|push)\b|исправ|измени|удали|добав|создай|перепиши/i;
+export const READ = /\b(read|summari[sz]e|summary|analy[sz]e|analysis|explain|review|describe|overview|study|inspect|go through|tell me about)\b|прочита|прочти|изучи|проанализ|резюм|опиши|объясни|обзор/i;
+export const WRITE = /\b(fix|implement|change|refactor|rewrite|write|create|add|delete|remove|update|edit|rename|move|merge|close|commit|push)\b|исправ|измени|удали|добав|создай|перепиши/i;
 
 // Is this a pure "list files" question? Returns the extension filter ([] = all files) or null.
 export function inventoryIntent(request: string): string[] | null {
   const text = request.replace(/\[([^\]]*)\]\([^)]*\)/g, " $1 ").replace(/https?:\/\/\S+/g, " ");
-  if (!LIST.test(text) || WRITE.test(text) || !/\bfiles?\b|файл/i.test(text)) return null;
+  if (!LIST.test(text) || READ.test(text) || WRITE.test(text) || !/\bfiles?\b|файл/i.test(text)) return null;
+  const exts = extsOf(text);
+  if (!exts.length && !/\ball\s+(the\s+)?files\b|все\s+файл/i.test(text)) return null;
+  return exts;
+}
+export function extsOf(text: string): string[] {
   const exts = new Set<string>();
   const add = (e: string) => { e = e.toLowerCase(); if (e === "markdown") { exts.add("md"); exts.add("markdown"); } else if (!NOT_EXT.has(e)) exts.add(e); };
   for (const m of text.matchAll(/(?:^|[\s(\["'`*,])\.?([A-Za-z0-9+]{1,10})[- ](?:files?\b|файл)/gi)) add(m[1]);
   for (const m of text.matchAll(/\*\.([A-Za-z0-9+]{1,10})\b/g)) add(m[1]);
   for (const m of text.matchAll(/extensions?\s+\.?([A-Za-z0-9+]{1,10})\b/gi)) add(m[1]);
   for (const m of text.matchAll(/(?:^|\s)\.([A-Za-z0-9+]{1,10})\b/g)) add(m[1]);
-  if (!exts.size && !/\ball\s+(the\s+)?files\b|все\s+файл/i.test(text)) return null;
   return [...exts].sort();
 }
 
@@ -57,13 +62,14 @@ export function inventoryTarget(request: string, linked?: { owner: string; name:
 
 function savedToken(): string | null { try { return loadSecret(SECRET); } catch { return null; } }
 
-async function api(path: string, tok: string | null): Promise<any> {
+async function apiCall(path: string, tok: string | null, raw = false, signal?: AbortSignal): Promise<any> {
+  const timeout = AbortSignal.timeout(20_000);
   const res = await fetch(`${API}${path}`, {
-    headers: { ...(tok ? { Authorization: `Bearer ${tok}` } : {}), Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Relay" },
-    redirect: "error", signal: AbortSignal.timeout(20_000),
-  }).catch(e => { throw new InventoryError(`Cannot reach GitHub (${e.cause?.code || e.message}). Check the internet connection on the Relay PC.`); });
+    headers: { ...(tok ? { Authorization: `Bearer ${tok}` } : {}), Accept: raw ? "application/vnd.github.raw+json" : "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Relay" },
+    redirect: "error", signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+  }).catch(e => { if (signal?.aborted) throw new InventoryError("Cancelled.", 499); throw new InventoryError(`Cannot reach GitHub (${e.cause?.code || e.message}). Check the internet connection on the Relay PC.`); });
   const access = tok ? "with the saved GitHub token" : "without a GitHub token (public access only; connect GitHub in Settings for private repositories)";
-  if (res.ok) return res.json();
+  if (res.ok) return raw ? Buffer.from(await res.arrayBuffer()) : res.json();
   const body = await res.json().catch(() => ({} as any));
   if (res.status === 401) throw new InventoryError("GitHub rejected the saved token (401). It may be wrong, expired or revoked; update it in Settings.", 401);
   if (res.status === 429 || (res.status === 403 && res.headers.get("x-ratelimit-remaining") === "0")) {
@@ -75,8 +81,14 @@ async function api(path: string, tok: string | null): Promise<any> {
   throw new InventoryError(`GitHub request failed (${res.status}${body.message ? `: ${body.message}` : ""}).`);
 }
 
-export async function runInventory(t: InventoryTarget): Promise<Inventory> {
+// One file's bytes at a pinned commit; the path must come from the real tree of that commit.
+export async function fetchFile(owner: string, repo: string, path: string, commit: string, signal?: AbortSignal): Promise<Buffer> {
+  return apiCall(`/repos/${owner}/${repo}/contents/${path.split("/").map(encodeURIComponent).join("/")}?ref=${encodeURIComponent(commit)}`, savedToken(), true, signal);
+}
+
+export async function runInventory(t: InventoryTarget, signal?: AbortSignal): Promise<Inventory> {
   const tok = savedToken();
+  const api = (path: string, tok: string | null) => apiCall(path, tok, false, signal);
   const meta = await api(`/repos/${t.owner}/${t.repo}`, tok);
   const branch = t.branch || meta.default_branch;
   if (!validBranch(String(branch || ""))) throw new InventoryError("GitHub did not report a usable default branch for this repository.");
