@@ -10,18 +10,21 @@ import { useForm } from "react-hook-form";
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from "@/components/ui/form";
 import { Dialog, DialogContent, DialogTitle, DialogDescription } from "@/components/ui/dialog";
 import { ArrowUp, ArrowUpRight, ArrowRight, AudioLines, Bot, Braces, Check, CheckCheck, ChevronDown, ChevronRight, CircleHelp, CircleStop, Clock3, Code2, Cpu, Database, Download, FileCode2, FileText, FlaskConical, Folder, FolderOpen, GitBranch, Layers3, LoaderCircle, Menu, MessageSquare, Network, Paperclip, Pause, Play, Plus, Search, Settings2, ShieldCheck, SlidersHorizontal, Terminal, Trash2, Workflow, X, Zap } from "lucide-react";
-import type { Agent, Evaluation, Project, Role, Run, Step } from "@shared/schema";
+import type { Agent, Evaluation, FileAsset, Project, Role, Run, Step } from "@shared/schema";
+import { ProjectTree, ConversationMenu, MoveDialog, NameDialog, DeleteProjectDialog, conversationTitle } from "./ProjectTree";
+import { SourcesPanel, RetainedFiles } from "./Sources";
+import { ThinkingPane } from "./ThinkingPane";
 import { sessionToRestore } from "@shared/sessionSelection";
 import { GitHubSettings, WebSearchSettings, ImportGitHubDialog, RepoDialog, GitActionsCard, ApplyChanges, ResearchCard } from "./Connections";
 
 const roleIcons = { orchestrator: Network, architect: GitBranch, coder: Code2, tester: FlaskConical, data: Database, analyst: Search };
 const roleDescriptions: Record<string, string> = { orchestrator: "Breaks down requests and coordinates the team.", architect: "Plans the structure, interfaces, and dependencies.", coder: "Turns the plan into proposed code changes.", tester: "Writes tests and checks for edge cases.", data: "Works with supplied and synthetic datasets.", analyst: "Reviews the result against your requirements." };
-const nav = [{ href: "/", name: "Workspace", icon: MessageSquare }, { href: "/agents", name: "Agents", icon: Network }, { href: "/projects", name: "Projects", icon: Folder }, { href: "/runs", name: "Run history", icon: Clock3 }, { href: "/evaluations", name: "Evaluations", icon: ShieldCheck }];
+const nav = [{ href: "/agents", name: "Agents", icon: Network }, { href: "/runs", name: "Run history", icon: Clock3 }, { href: "/evaluations", name: "Evaluations", icon: ShieldCheck }];
 const statuses: Record<string, string> = { planning: "Planning", pausing: "Pausing", paused: "Paused and saved", approval: "Needs approval", running: "Running", complete: "Complete", failed: "Failed", cancelled: "Cancelled", queued: "Queued", pending: "Not evaluated", pass: "Pass", fail: "Fail" };
 const formatTime = (t: string) => new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 const json = async (method: string, path: string, data?: unknown) => (await apiRequest(method, path, data)).json();
 const invalidate = () => queryClient.invalidateQueries();
-type LiveProgress = { active: boolean; label?: string; phase?: "waiting" | "prompt" | "thinking" | "writing"; elapsedSeconds?: number; promptTotal?: number; promptDone?: number; thinkTokens?: number; outTokens?: number; tokensPerSecond?: number | null; tail?: string };
+type LiveProgress = { active: boolean; log?: string; runId?: number | null; last?: { runId: number; label: string; log: string; endedAt: string } | null; label?: string; phase?: "waiting" | "prompt" | "thinking" | "writing"; elapsedSeconds?: number; promptTotal?: number; promptDone?: number; thinkTokens?: number; outTokens?: number; tokensPerSecond?: number | null; tail?: string };
 const phaseText = { waiting: "Sending the request to the model", prompt: "Reading the prompt and source context", thinking: "Thinking (reasoning before the answer)", writing: "Writing the answer" };
 const clock = (sec = 0) => `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, "0")}`;
 function ProgressBox({ p }: { p: LiveProgress | null }) {
@@ -32,7 +35,7 @@ function ProgressBox({ p }: { p: LiveProgress | null }) {
     <div className="progress-phase">{phaseText[p.phase || "waiting"]}{p.phase === "prompt" && pct !== null ? ` · ${pct}%` : ""}</div>
     {p.phase === "prompt" && pct !== null && <div className="progress-bar"><span style={{ width: `${pct}%` }}/></div>}
     <div className="progress-stats"><span>Thinking {p.thinkTokens || 0} tok</span><span>Answer {p.outTokens || 0} tok</span><span>{p.tokensPerSecond ? `${p.tokensPerSecond} tok/s` : "speed …"}</span></div>
-    {p.tail && <pre className="progress-tail">{p.tail.slice(-220)}</pre>}
+    <ThinkingPane log={p.log || ""} label={p.label} live/>
   </div>;
 }
 
@@ -60,7 +63,12 @@ function ControlRoom() {
   const [projectId, setProjectId] = useState<number | null>(null);
   const [runId, setRunId] = useState<number | null>(null);
   const { data: currentRun } = useQuery<Run>({ queryKey: ["/api/runs", runId], enabled: runId !== null, refetchInterval: query => ["planning", "running", "pausing"].includes(query.state.data?.status || "") ? 800 : false });
-  const [mode, setMode] = useState<"demo" | "ollama">("demo");
+  const mode = "ollama" as "demo" | "ollama"; // demo selector removed; existing demo conversations still display
+  const [pendingFiles, setPendingFiles] = useState<FileAsset[]>([]);
+  const [renameRun, setRenameRun] = useState<Run | null>(null);
+  const [moveRun, setMoveRun] = useState<Run | null>(null);
+  const [deleteProject, setDeleteProject] = useState<Project | null>(null);
+  const [deleteFiles, setDeleteFiles] = useState(false);
   const [panel, setPanel] = useState<"activity" | "outputs">("activity");
   const [mobileOpen, setMobileOpen] = useState(false);
   const [projectModal, setProjectModal] = useState(false);
@@ -81,7 +89,9 @@ function ControlRoom() {
   const chatForm = useForm({ defaultValues: { request: "" } });
   const request = chatForm.watch("request");
   const bottom = useRef<HTMLDivElement>(null);
-  const selected = projects.find(p => p.id === projectId) || projects[0];
+  const selected = projects.find(p => p.id === projectId && !p.archived) || projects.find(p => !p.archived);
+  const conversationMatch = location.match(/^\/c\/(\d+)$/);
+  const isWorkspace = location === "/" || !!conversationMatch;
   const activeRun = currentRun && currentRun.id === runId ? currentRun : undefined;
   const working = ["planning", "running", "pausing"].includes(activeRun?.status || "");
   const paused = activeRun?.status === "paused", pausing = activeRun?.status === "pausing";
@@ -90,17 +100,25 @@ function ControlRoom() {
   useEffect(() => {
     if (!runsLoaded || restored.current) return;
     restored.current = true;
+    if (conversationMatch || location !== "/") return;
     let saved: string | null = null;
     try { saved = localStorage.getItem("relay-selected-run"); } catch {}
     const run = sessionToRestore(runs, saved);
-    if (run) { setRunId(run.id); setProjectId(run.projectId); setMode(run.mode); }
+    if (run) navigate(`/c/${run.id}`);
   }, [runsLoaded, runs]);
+  // Each conversation has its own workspace address (#/c/<id>).
+  useEffect(() => {
+    if (!conversationMatch) return;
+    const id = Number(conversationMatch[1]);
+    if (id !== runId) { setRunId(id); setOutput(null); setError(""); setPanel("activity"); chatForm.reset(); }
+    const run = runs.find(r => r.id === id); if (run && run.projectId !== projectId) setProjectId(run.projectId);
+  }, [location, runs, projectId]);
   useEffect(() => {
     if (runId === null) return;
     try { localStorage.setItem("relay-selected-run", String(runId)); } catch {}
   }, [runId]);
-  const pageName = nav.find(n => n.href === location)?.name || "Settings";
-  useEffect(() => { if (projects.length && projectId === null) setProjectId(projects[0].id); }, [projects]);
+  const pageName = isWorkspace ? (activeRun ? conversationTitle(activeRun) : "New conversation") : nav.find(n => n.href === location)?.name || "Settings";
+  useEffect(() => { if (projects.length && projectId === null && !conversationMatch) setProjectId(cur => cur ?? projects.find(p => !p.archived)?.id ?? null); }, [projects]);
   useEffect(() => { setMobileOpen(false); window.scrollTo({ top: 0 }); }, [location]);
   useEffect(() => { if (activeRun) bottom.current?.scrollIntoView({ behavior: "smooth", block: "nearest" }); }, [activeRun?.status]);
   async function send(values: { request: string }) {
@@ -110,9 +128,9 @@ function ControlRoom() {
       if (runId !== null && !activeRun) throw new Error("Wait for the current conversation to load before replying.");
       const r = activeRun
         ? await json("POST", `/api/runs/${activeRun.id}/messages`, { request: values.request, expectedTurn: activeRun.turns?.length || 0 })
-        : await json("POST", "/api/runs", { request: values.request, mode, projectId: selected?.id ?? null });
+        : await json("POST", "/api/runs", { request: values.request, mode, projectId: selected?.id ?? null, attachments: pendingFiles.map(f => f.id) });
       queryClient.setQueryData(["/api/runs", r.id], r);
-      setRunId(r.id); chatForm.reset(); await invalidate();
+      setRunId(r.id); setPendingFiles([]); chatForm.reset(); navigate(`/c/${r.id}`); await invalidate();
     }
     catch (e: any) { setError(e.message); }
     finally { setBusy(false); }
@@ -135,26 +153,28 @@ function ControlRoom() {
   }
   const [live, setLive] = useState<LiveProgress | null>(null);
   useEffect(() => {
-    if (!(busy || working) || mode === "demo") { setLive(null); return; }
     let stop = false;
     const tick = () => json("GET", "/api/progress").then(p => { if (!stop) setLive(p); }).catch(() => {});
-    tick(); const timer = setInterval(tick, 1000);
+    tick(); // after a generation ends its streamed text stays visible until the next one starts
+    if (!(busy || working)) return () => { stop = true; };
+    const timer = setInterval(tick, 1000);
     return () => { stop = true; clearInterval(timer); };
-  }, [busy, working, mode]);
-  // Start in local-model mode when the model server answers; Demo stays available in Settings.
-  useEffect(() => { json("GET", "/api/runtime").then(st => { setModelStatus(st); if (st?.connected) setMode("ollama"); }).catch(() => {}); }, []);
+  }, [busy, working, activeRun?.id, activeRun?.status]);
+  useEffect(() => { json("GET", "/api/runtime").then(setModelStatus).catch(() => {}); }, []);
   function newTask() { restored.current = true; try { localStorage.removeItem("relay-selected-run"); } catch {} setRunId(null); setError(""); setMobileOpen(false); setPanel("activity"); chatForm.reset(); navigate("/"); window.scrollTo({ top: 0 }); }
-  function openRun(id: number) { setRunId(id); setError(""); navigate("/"); }
-  function confirmDelete(run: Run) { setDeleteError(""); setDeleteTarget(run); }
+  function newConversation(id: number) { setProjectId(id); newTask(); }
+  function openRun(id: number) { setError(""); setMobileOpen(false); navigate(`/c/${id}`); }
+  function confirmDelete(run: Run) { setDeleteError(""); setDeleteFiles(false); setDeleteTarget(run); }
+  const { data: deleteTargetFiles = [] } = useQuery<FileAsset[]>({ queryKey: [`/api/files?runId=${deleteTarget?.id}`], enabled: !!deleteTarget });
   async function deleteConversation() {
     if (!deleteTarget || deleting) return;
     const id = deleteTarget.id;
     setDeleting(true); setDeleteError("");
     try {
-      await json("DELETE", `/api/runs/${id}`);
+      await json("DELETE", `/api/runs/${id}${deleteFiles ? "?files=delete" : ""}`);
       await queryClient.cancelQueries({ queryKey: ["/api/runs"] });
       queryClient.setQueryData<Run[]>(["/api/runs"], list => list?.filter(r => r.id !== id));
-      if (runId === id) { setRunId(null); setOutput(null); setPanel("activity"); chatForm.reset(); setError(""); }
+      if (runId === id) { setRunId(null); setOutput(null); setPanel("activity"); chatForm.reset(); setError(""); navigate("/"); }
       try { if (localStorage.getItem("relay-selected-run") === String(id)) localStorage.removeItem("relay-selected-run"); } catch {}
       queryClient.removeQueries({ queryKey: ["/api/runs", id], exact: true });
       setDeleteTarget(null);
@@ -177,7 +197,7 @@ function ControlRoom() {
       <div className="specialists">{agents.filter(a => a.role !== "orchestrator").map(a => {
         const Icon = roleIcons[a.role]; const s = activeRun?.steps.find(s => s.role === a.role);
         return <button data-testid={`node-${a.role}`} key={a.role} className={`specialist ${s?.status || ""} ${!a.enabled ? "off" : ""}`} onClick={() => setEditAgent(a)}>
-          <span className="node-connector"/><Icon size={21}/><strong>{a.name}</strong><span className="agent-size">{modelName(a)} <span>· {mode === "demo" ? "Demo" : "Local"}</span></span>
+          <span className="node-connector"/><Icon size={21}/><strong>{a.name}</strong><span className="agent-size">{modelName(a)} <span>· Local</span></span>
           <span className={`agent-state ${s?.status || ""}`}>{s?.status === "running" ? <LoaderCircle size={10} className="spin"/> : s?.status === "complete" ? <Check size={10}/> : <span className="tiny-dot"/>}{s ? statuses[s.status] : a.enabled ? "Ready" : "Disabled"}</span>
         </button>;
       })}</div>
@@ -192,28 +212,28 @@ function ControlRoom() {
     {mobileOpen && <button className="sidebar-scrim" aria-label="Close navigation" onClick={() => setMobileOpen(false)}/>}
     <aside className={`sidebar ${mobileOpen ? "open" : ""}`}>
       <div className="brand"><span>relay<span className="brand-period">.</span></span><Badge>LOCAL AI</Badge></div>
-      <button data-testid="button-project-switch" className="workspace-switch" onClick={() => navigate("/projects")}><span className="workspace-avatar">P</span><span>Personal workspace<small>Local-first development</small></span><ChevronDown size={14}/></button>
       <button data-testid="button-new-task" className="new-task" onClick={newTask} disabled={working}><Plus size={17}/>New task<span>↗</span></button>
-      <span className="nav-label">WORKSPACE</span>
+      <span className="nav-label">MENU</span>
       <nav>{nav.map(n => <Link key={n.href} href={n.href} onClick={() => setMobileOpen(false)} data-testid={`nav-${n.name.toLowerCase().replaceAll(" ", "-")}`} className={`nav-link ${location === n.href ? "selected" : ""}`}><n.icon size={18}/>{n.name}{n.name === "Agents" && <span className="nav-count">{agents.length || 6}</span>}</Link>)}</nav>
-      <div className="sidebar-projects"><div className="nav-label">YOUR PROJECTS<IconButton label="Add project" onClick={() => setProjectModal(true)}><Plus size={14}/></IconButton></div>{projects.slice(0, 3).map(p => <button data-testid={`sidebar-project-${p.id}`} key={p.id} className={`project-shortcut ${selected?.id === p.id ? "current" : ""}`} onClick={() => { setProjectId(p.id); newTask(); }}><span className="project-square"/><span>{p.name}</span>{p.sample && <small>EXAMPLE</small>}</button>)}</div>
+      <ProjectTree projects={projects} runs={runs} selectedProjectId={selected?.id ?? null} runId={runId} busy={working}
+        onOpenRun={openRun} onNewConversation={newConversation} onRepo={setRepoProjectId} onImportFiles={() => setProjectModal(true)}
+        onImportGitHub={() => setGithubModal(true)} onDeleteProject={setDeleteProject}/>
       <div className="sidebar-bottom">
-        <div className="runtime-mini"><span className="runtime-symbol"><Cpu size={18}/></span><div><strong>{mode === "demo" ? "Demo runtime" : "Local model"}</strong><span>{mode === "demo" ? "Explore without a model" : modelStatus?.connected ? `${modelStatus.runtime} connected` : "Not connected"}</span></div><span className={`dot ${modelStatus?.connected && mode === "ollama" ? "green" : "amber"}`}/></div>
+        <div className="runtime-mini"><span className="runtime-symbol"><Cpu size={18}/></span><div><strong>Local model</strong><span>{modelStatus?.connected ? `${modelStatus.runtime} connected` : "Not connected"}</span></div><span className={`dot ${modelStatus?.connected ? "green" : "amber"}`}/></div>
         <Link href="/settings" data-testid="nav-settings" className={`nav-link ${location === "/settings" ? "selected" : ""}`}><Settings2 size={18}/>Settings</Link>
         <button data-testid="button-help" className="nav-link" onClick={() => setHelp(true)}><CircleHelp size={18}/>How Relay works<ArrowUpRight className="end" size={14}/></button>
         <div className="profile"><span className="profile-avatar">Y</span><span>Your workspace<small>Personal edition</small></span><Badge>v0.1</Badge></div>
       </div>
     </aside>
     <div className="main-shell">
-      <header className="topbar"><div className="breadcrumb"><IconButton label="Open navigation" onClick={() => setMobileOpen(true)}><Menu className="mobile-menu" size={19}/></IconButton><span>Personal workspace</span><ChevronRight size={14}/><strong>{pageName}</strong></div><div className="topbar-right"><span className="review-mode"><ShieldCheck size={14}/>Review-first</span><SystemStatus/><button data-testid="button-runtime-header" className="runtime-pill" onClick={() => navigate("/settings")}><span className={`dot ${mode === "demo" ? "amber" : ""}`}/>{mode === "demo" ? "Demo mode" : "Local model"}<ChevronDown size={12}/></button></div></header>
-      <main id="main" tabIndex={-1} className={`main ${location === "/" ? "workspace-main" : ""}`}>
-        <Switch>
-          <Route path="/">
-            <div className="page-heading"><div><div className="eyebrow">YOUR AI DEVELOPMENT STUDIO</div><h1>Workspace</h1><p>You set the direction. Your agents work together.</p></div><button data-testid="button-context" className="button secondary context-button" onClick={() => navigate("/projects")}><Folder size={15}/>{selected?.name || "Choose project"}<ChevronDown size={14}/></button></div>
+      <header className="topbar"><div className="breadcrumb"><IconButton label="Open navigation" onClick={() => setMobileOpen(true)}><Menu className="mobile-menu" size={19}/></IconButton><span>{isWorkspace ? selected && activeRun ? activeRun.projectName : selected?.name || "Relay" : "Relay"}</span><ChevronRight size={14}/><strong>{pageName}</strong></div><div className="topbar-right"><span className="review-mode"><ShieldCheck size={14}/>Review-first</span><SystemStatus/><button data-testid="button-runtime-header" className="runtime-pill" onClick={() => navigate("/settings")}><span className={`dot ${modelStatus?.connected ? "" : "amber"}`}/>Local model<ChevronDown size={12}/></button></div></header>
+      <main id="main" tabIndex={-1} className={`main ${isWorkspace ? "workspace-main" : ""}`}>
+        {isWorkspace ? <>
+            <div className="page-heading"><div><div className="eyebrow">{(activeRun?.projectName || selected?.name || "General").toUpperCase()}</div><h1>{activeRun ? conversationTitle(activeRun) : "New conversation"}</h1><p>{activeRun ? `Conversation ${activeRun.id} · its own workspace, sources and files.` : `Starts a new conversation in ${selected?.name || "General"}.`}</p></div></div>
             {loadError && <div role="alert" className="error-banner">Could not load your workspace. <button onClick={() => invalidate()}>Try again</button></div>}
             {isLoading ? <div className="loading-workspace"><LoaderCircle className="spin"/>Loading your workspace…</div> : <div className="workspace-grid">
               <section className="chat-panel">
-                <div className="section-head"><div><MessageSquare size={16}/><h2>Conversation</h2></div><div><span className="small-muted">{activeRun ? `RUN ${String(activeRun.id).padStart(3, "0")}` : "New session"}</span>{activeRun && <IconButton label="Delete conversation" testid="button-delete-current-conversation" disabled={busy || working || deleting} onClick={() => confirmDelete(activeRun)}><Trash2 size={16}/></IconButton>}</div></div>
+                <div className="section-head"><div><MessageSquare size={16}/><h2>Conversation</h2></div><div><span className="small-muted">{activeRun ? `RUN ${String(activeRun.id).padStart(3, "0")}` : "New session"}</span>{activeRun && <ConversationMenu run={activeRun} disabled={busy || working || deleting} onRename={() => setRenameRun(activeRun)} onMove={() => setMoveRun(activeRun)} onDelete={() => confirmDelete(activeRun)} onArchived={() => {}}/>}</div></div>
                 <div className="chat-content">
                   {!activeRun ? <div className="welcome">
                     <div className="welcome-avatar"><AudioLines size={25}/></div><div className="assistant-label">RELAY ORCHESTRATOR</div>
@@ -249,36 +269,32 @@ function ControlRoom() {
                 <div className="composer-area">{error && <div className="error-banner" role="alert">{error}</div>}
                   <Form {...chatForm}><form onSubmit={chatForm.handleSubmit(send)} className="composer">
                     <FormField control={chatForm.control} name="request" rules={{ minLength: 3 }} render={({ field }) => <FormItem><FormLabel className="sr-only">Your request</FormLabel><FormControl><textarea {...field} id="request" data-testid="input-request" placeholder={runId !== null ? "Reply in this conversation…\nUse New task to start a separate chat." : "Describe what you want to build…\nYou can write in English or Russian."} rows={3} disabled={busy || working} onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); chatForm.handleSubmit(send)(); } }}/></FormControl></FormItem>}/>
-                    <div className="composer-toolbar"><div><IconButton label="Import source files" onClick={() => setProjectModal(true)}><Paperclip size={17}/></IconButton><span className="composer-project"><Folder size={13}/>{selected?.repo ? `${selected.repo.fullName} · ${selected.repo.fileCount.toLocaleString("en-US")} files indexed` : `${selected?.files.length || 0} ${selected?.files.length === 1 ? "file" : "files"} in context`}</span></div>
+                    <div className="composer-toolbar"><div><IconButton label="Upload files to this conversation" onClick={() => { setPanel("activity"); setTimeout(() => (document.querySelector('[data-testid="input-upload-files"]') as HTMLInputElement | null)?.click(), 0); }}><Paperclip size={17}/></IconButton><span className="composer-project"><Folder size={13}/>{selected?.repo ? `${selected.repo.fullName} · ${selected.repo.fileCount.toLocaleString("en-US")} files indexed` : `${selected?.files.length || 0} ${selected?.files.length === 1 ? "file" : "files"} in context`}</span></div>
                       {working || paused || (stopped && !request.trim()) ? <div className="generation-controls">
                         {paused || stopped ? <button type="button" data-testid="button-resume" className="send-button" aria-label="Resume saved response" title="Resume saved response" onClick={() => changeRun("resume")} disabled={busy}><Play size={18}/></button> :
                           <button type="button" data-testid="button-pause" className="send-button" aria-label="Pause and save response" title="Pause and save response" onClick={() => changeRun("pause")} disabled={busy || pausing}>{pausing ? <LoaderCircle size={18} className="spin"/> : <Pause size={18}/>}</button>}
                         {!stopped && <button type="button" data-testid="button-stop" className="stop-button" aria-label="Stop and save session" onClick={() => changeRun("cancel")} disabled={busy}><CircleStop size={16}/>Stop</button>}
                       </div> : <button data-testid="button-send" className="send-button" type="submit" aria-label="Send request" disabled={request.trim().length < 3 || busy}>{busy ? <LoaderCircle className="spin" size={18}/> : <ArrowUp size={19}/>}</button>}
                     </div>
-                    {busy && !working && mode === "ollama" && <ProgressBox p={live}/>}
+                    {busy && !working && <ProgressBox p={live}/>}
                   </form></Form>
                   <div className="composer-note"><span><ShieldCheck size={11}/>You approve every run</span><span>Enter to send · Shift + Enter for a new line</span></div>
                 </div>
               </section>
               <div className="right-column">{workflow}
                 <section className="activity-panel"><div className="panel-tabs"><div><button data-testid="tab-activity" className={panel === "activity" ? "active" : ""} onClick={() => setPanel("activity")}><Terminal size={15}/>Activity</button><button data-testid="tab-outputs" className={panel === "outputs" ? "active" : ""} onClick={() => setPanel("outputs")}><FileCode2 size={15}/>Outputs <span className="count">{activeRun?.steps.filter(s => s.output).length || 0}</span></button></div>{activeRun && <IconButton label="Export run" onClick={() => exportRun(activeRun)}><Download size={15}/></IconButton>}</div>
-                  {panel === "activity" ? <div className="activity-list">{(activeRun?.events || [{ time: "", message: "Workspace initialized" }, { time: "", message: `${activeCount} specialist agents ready` }, { time: "", message: "Waiting for your first request" }]).map((e, i, arr) => <div className={`activity-item ${i === arr.length - 1 ? "latest" : ""}`} key={i}><span className="activity-dot"/><span>{e.message}</span><time>{e.time ? formatTime(e.time) : "SYSTEM"}</time></div>)}{working && (activeRun?.mode === "demo" ? <div className="activity-live"><LoaderCircle size={13} className="spin"/> Simulating agent handoff…</div> : <ProgressBox p={live}/>)}</div> : <div className="output-list">{activeRun?.steps.some(s => s.output) ? activeRun.steps.filter(s => s.output).map((s, i) => <button data-testid={`output-${s.role}`} className="output-row" key={i} onClick={() => setOutput(s)}><FileText size={20}/><span><strong>{s.title}</strong><small>{s.role} · {activeRun.mode === "demo" ? "Example output" : "Model-generated proposal"}</small></span><ChevronRight size={15}/></button>) : <div className="empty-outputs"><FileCode2 size={25}/><h3>A place for the finished work</h3><p>Agent outputs appear here after a run.</p></div>}</div>}
-                  <div className="activity-footer"><span>{mode === "demo" ? "DEMO ENVIRONMENT" : "LOCAL MODEL ADAPTER"}</span><span><span className="dot"/>No shell execution</span></div>
+                  {panel === "activity" ? <div className="activity-list"><SourcesPanel run={activeRun} project={activeRun ? projects.find(p => p.id === activeRun.projectId) : selected} pending={pendingFiles} setPending={setPendingFiles}/>{(activeRun?.events || [{ time: "", message: "Workspace initialized" }, { time: "", message: `${activeCount} specialist agents ready` }, { time: "", message: "Waiting for your first request" }]).map((e, i, arr) => <div className={`activity-item ${i === arr.length - 1 ? "latest" : ""}`} key={i}><span className="activity-dot"/><span>{e.message}</span><time>{e.time ? formatTime(e.time) : "SYSTEM"}</time></div>)}{working && (activeRun?.mode === "demo" ? <div className="activity-live"><LoaderCircle size={13} className="spin"/> Simulating agent handoff…</div> : <ProgressBox p={live}/>)}
+                    {!working && activeRun && live?.last?.runId === activeRun.id && !!live.last.log && <ThinkingPane log={live.last.log} label={live.last.label} live={false}/>}</div> : <div className="output-list">{activeRun?.steps.some(s => s.output) ? activeRun.steps.filter(s => s.output).map((s, i) => <button data-testid={`output-${s.role}`} className="output-row" key={i} onClick={() => setOutput(s)}><FileText size={20}/><span><strong>{s.title}</strong><small>{s.role} · {activeRun.mode === "demo" ? "Example output" : "Model-generated proposal"}</small></span><ChevronRight size={15}/></button>) : <div className="empty-outputs"><FileCode2 size={25}/><h3>A place for the finished work</h3><p>Agent outputs appear here after a run.</p></div>}</div>}
+                  <div className="activity-footer"><span>LOCAL MODEL ADAPTER</span><span><span className="dot"/>No shell execution</span></div>
                 </section>
                 <div className="quality-strip"><ShieldCheck size={20}/><div><strong>Built for a higher standard</strong><span>Compare your team against Opus 5.5.</span></div><button data-testid="button-open-evaluations" className="icon-button" aria-label="Open evaluations" onClick={() => navigate("/evaluations")}><ArrowUpRight size={18}/></button></div>
               </div>
             </div>}
-          </Route>
+          </> : <Switch>
           <Route path="/agents">
             <PageHeading eyebrow="THE RIGHT SPECIALIST FOR EVERY STEP" title="Your agent team" text="One orchestrator. Five focused roles. Models you control." action={<Badge kind="green">{activeCount} specialists enabled</Badge>}/>
             <div className="info-banner"><Cpu size={18}/><div><strong>Different roles, not necessarily different models.</strong><p>Agents run sequentially and share one loaded model by default, so the GPU holds a single model. Changing a role does not train a new model.</p></div></div>
             <div className="agents-grid">{agents.map(a => { const Icon = roleIcons[a.role]; return <article className={`agent-card ${a.role === "orchestrator" ? "coordinator-card" : ""}`} key={a.role}><div className="agent-card-top"><Icon size={24}/><Badge kind={a.enabled ? "green" : ""}>{a.role === "orchestrator" ? "COORDINATOR" : a.enabled ? "ENABLED" : "DISABLED"}</Badge></div><h2>{a.name}</h2><p>{roleDescriptions[a.role]}</p><div className="agent-model"><Cpu size={14}/><code>{a.model}</code></div><button data-testid={`configure-${a.role}`} className="button secondary" onClick={() => setEditAgent(a)}><Settings2 size={14}/>Configure agent<ArrowUpRight size={14}/></button></article>; })}</div>
-          </Route>
-          <Route path="/projects">
-            <PageHeading eyebrow="CONTEXT MAKES BETTER CODE" title="Projects" text="Give your team the source files they need." action={<div className="heading-actions"><button data-testid="button-import-github" className="button secondary" onClick={() => setGithubModal(true)}><GitBranch size={16}/>Import from GitHub</button><button data-testid="button-import-project" className="button primary" onClick={() => setProjectModal(true)}><Plus size={16}/>Import files</button></div>}/>
-            <div className="info-banner"><ShieldCheck size={18}/><div><strong>Import only code you want to share with this workspace.</strong><p>Files are stored in this app’s backend database. The hosted preview is not your PC. Secrets, credentials, binaries, and dependencies should stay out.</p></div></div>
-            <div className="project-grid">{projects.map(p => <article className="project-card" key={p.id}><div className="project-card-top"><FolderOpen size={26}/><Badge kind={p.sample ? "" : "green"}>{p.repo ? "GITHUB" : p.sample ? "EXAMPLE PROJECT" : "IMPORTED"}</Badge></div><h2>{p.name}</h2><p>{p.description || "Source context for your agent team."}</p><div className="project-meta"><span><span className="dot green"/>{p.language}</span>{p.repo ? <><span>{p.repo.fileCount.toLocaleString("en-US")} files</span><span>{p.repo.branch}</span></> : <><span>{p.files.length} {p.files.length === 1 ? "file" : "files"}</span><span>{(p.files.reduce((n, f) => n + f.content.length, 0) / 1000).toFixed(1)}k characters</span></>}</div>{p.repo && <button data-testid={`button-open-repo-${p.id}`} className="button secondary" onClick={() => setRepoProjectId(p.id)}><GitBranch size={14}/>Files, changes and pull requests</button>}<div className="project-files">{p.files.slice(0, 4).map((f, i) => <div key={i}><FileCode2 size={14}/>{f.name}</div>)}{p.files.length > 4 && <small>+ {p.files.length - 4} more files</small>}</div><button data-testid={`open-project-${p.id}`} className="button secondary" onClick={() => { setProjectId(p.id); newTask(); }}>Open in workspace<ArrowRight size={15}/></button></article>)}</div>
           </Route>
           <Route path="/runs">
             <PageHeading eyebrow="EVERY HANDOFF, ACCOUNTED FOR" title="Run history" text="Review the requests, decisions, and outputs of your team." action={<button className="button primary" onClick={newTask}><Plus size={16}/>New task</button>}/>
@@ -294,27 +310,40 @@ function ControlRoom() {
           </Route>
           <Route path="/settings">
             <PageHeading eyebrow="YOUR MODELS. YOUR WORKFLOW." title="Settings" text="Choose how your agent team runs."/>
-            <section className="settings-section"><div className="settings-section-title"><Cpu size={19}/><h2>Runtime</h2></div><div className="runtime-options"><button data-testid="runtime-demo" className={`runtime-option ${mode === "demo" ? "chosen" : ""}`} onClick={() => setMode("demo")}><div><FlaskConical size={21}/><span className="radio-mark"/></div><strong>Demo environment</strong><p>Explore planning, approvals, and handoffs with labeled example outputs. No model calls.</p></button><button data-testid="runtime-ollama" className={`runtime-option ${mode === "ollama" ? "chosen" : ""}`} onClick={() => setMode("ollama")}><div><Cpu size={21}/><span className="radio-mark"/></div><strong>Local model</strong><p>Run real model inference through llama.cpp or Ollama on this PC.</p></button></div>
+            <section className="settings-section"><div className="settings-section-title"><Cpu size={19}/><h2>Runtime</h2></div><InferenceDevice status={modelStatus}/>
               <div className="connection-row"><div><span className="field-label">{(modelStatus?.runtime || "Ollama").toUpperCase()} ENDPOINT</span><code>{modelStatus?.endpoint || "http://127.0.0.1:11434"}</code></div><button data-testid="button-test-connection" className="button secondary" disabled={checking} onClick={checkConnection}>{checking ? <LoaderCircle size={15} className="spin"/> : <Zap size={15}/>}Test connection</button></div>
               {modelStatus && <div role="status" data-testid="status-connection" className={modelStatus.connected ? "success-banner" : "error-banner"}>{modelStatus.connected ? `Connected to ${modelStatus.runtime}. Models: ${modelStatus.models.join(", ") || "none"}. Context ${modelStatus.context}, max output ${modelStatus.maxTokens}, thinking ${modelStatus.thinking ? "on" : "off"}, timeout ${modelStatus.timeoutMinutes} min.` : modelStatus.message || "Ollama is not available on this app server."}</div>}
-              <p className="settings-note">The hosted preview cannot reach Ollama on your PC. For local use, run this app’s backend alongside Ollama. No cloud model fallback is used. Runtime selection applies to new runs.</p>
+              <p className="settings-note">Relay talks only to the local model server on the Relay PC. No cloud model fallback is used. The GPU shown is taken from the running model server’s own startup log, not from installed hardware.</p>
             </section>
+            <RetainedFiles/>
             <GitHubSettings/>
             <WebSearchSettings/>
             <RemoteSettings/>
             <section className="settings-section"><div className="settings-section-title"><ShieldCheck size={19}/><h2>Execution boundaries</h2></div><div className="policy-row"><div><strong>Approval before specialist execution</strong><p>Sending a request lets the orchestrator plan. Specialists wait for your approval.</p></div><Badge kind="green">ALWAYS ON</Badge></div><div className="policy-row"><div><strong>Sequential agents</strong><p>One specialist runs at a time, with previous outputs as context.</p></div><Badge>1 AT A TIME</Badge></div><div className="policy-row"><div><strong>Repository and shell access</strong><p>Imported files are context only. No file writes, builds, tests, or web collection.</p></div><Badge kind="amber">NOT CONNECTED</Badge></div><div className="policy-row"><div><strong>Storage</strong><p>SQLite on this app server. Survives restarts, not guaranteed across redeployment.</p></div><Badge>SERVER-SIDE</Badge></div></section>
           </Route>
           <Route><div className="large-empty"><h1>Page not found</h1><button className="button primary" onClick={() => navigate("/")}>Back to workspace</button></div></Route>
-        </Switch>
+        </Switch>}
       </main>
     </div>
-    <Dialog open={!!deleteTarget} onOpenChange={open => { if (!open && !deleting) setDeleteTarget(null); }}><DialogContent className="app-dialog"><DialogTitle>Delete conversation?</DialogTitle><DialogDescription>This permanently removes all messages, outputs and the saved session file from the Relay server PC. Project files, repositories and changes already made on GitHub are not deleted. This cannot be undone.</DialogDescription><p>{deleteTarget?.request}</p>{deleteError && <div role="alert" className="error-banner">{deleteError}</div>}<div className="dialog-footer"><button type="button" className="button secondary" disabled={deleting} onClick={() => setDeleteTarget(null)}>Cancel</button><button type="button" data-testid="button-confirm-delete-conversation" className="button secondary delete-conversation" disabled={deleting} onClick={deleteConversation}><Trash2 size={16}/>{deleting ? "Deleting…" : "Delete conversation"}</button></div></DialogContent></Dialog>
+    <Dialog open={!!deleteTarget} onOpenChange={open => { if (!open && !deleting) setDeleteTarget(null); }}><DialogContent className="app-dialog"><DialogTitle>Delete conversation?</DialogTitle><DialogDescription>This permanently removes all messages, outputs and the saved session file from the Relay server PC. Project files, repositories and changes already made on GitHub are not deleted. This cannot be undone.</DialogDescription><p>{deleteTarget && conversationTitle(deleteTarget)}</p>{deleteTargetFiles.length > 0 && <label className="checkbox-row"><input type="checkbox" data-testid="toggle-delete-conversation-files" checked={deleteFiles} onChange={e => setDeleteFiles(e.target.checked)}/><span>Also delete its {deleteTargetFiles.length} retained file{deleteTargetFiles.length === 1 ? "" : "s"}. Unchecked: they stay in Settings › Retained files.</span></label>}{deleteError && <div role="alert" className="error-banner">{deleteError}</div>}<div className="dialog-footer"><button type="button" className="button secondary" disabled={deleting} onClick={() => setDeleteTarget(null)}>Cancel</button><button type="button" data-testid="button-confirm-delete-conversation" className="button secondary delete-conversation" disabled={deleting} onClick={deleteConversation}><Trash2 size={16}/>{deleting ? "Deleting…" : "Delete conversation"}</button></div></DialogContent></Dialog>
     <ProjectDialog open={projectModal} onClose={() => setProjectModal(false)} onCreated={p => { setProjectId(p.id); setProjectModal(false); newTask(); }}/>
     <ImportGitHubDialog open={githubModal} onClose={() => setGithubModal(false)} onCreated={p => { setProjectId(p.id); setGithubModal(false); setRepoProjectId(p.id); }}/>
     {repoProjectId !== null && <RepoDialog project={projects.find(p => p.id === repoProjectId) || null} onClose={() => setRepoProjectId(null)}/>}
     <AgentDialog agent={editAgent} onClose={() => setEditAgent(null)}/>
+    <NameDialog open={!!renameRun} title="Rename conversation" label="Conversation name" initial={renameRun ? conversationTitle(renameRun) : ""} onClose={() => setRenameRun(null)} onSave={async title => { const r = await json("PATCH", `/api/runs/${renameRun!.id}`, { title }); queryClient.setQueryData(["/api/runs", r.id], r); await invalidate(); }}/>
+    <MoveDialog run={moveRun} projects={projects} onClose={() => setMoveRun(null)}/>
+    <DeleteProjectDialog project={deleteProject} runs={runs} onClose={() => setDeleteProject(null)} onDeleted={id => { if (activeRun?.projectId === id) newTask(); if (projectId === id) setProjectId(null); }}/>
     <Dialog open={!!output} onOpenChange={o => !o && setOutput(null)}><DialogContent className="app-dialog output-dialog"><DialogTitle>{output?.title}</DialogTitle><DialogDescription>Agent output · {output?.role}. A proposal, not an executed result.</DialogDescription><div className="output-dialog-body"><RichOutput text={output?.output || ""}/></div><div className="dialog-footer"><button data-testid="button-download-output" className="button primary" onClick={() => output && download(`${output.role}-output.md`, output.output || "")}><Download size={15}/>Download Markdown</button></div></DialogContent></Dialog>
-    <Dialog open={help} onOpenChange={setHelp}><DialogContent className="app-dialog"><DialogTitle>From request to reviewed output</DialogTitle><DialogDescription>Relay is a local-first, multi-agent development workspace.</DialogDescription><div className="help-steps">{["Choose a project or import source files as context.", "Describe your task in English or Russian.", "Review the orchestrator’s plan and approve it.", "Specialists work sequentially, sharing their outputs.", "Review and export the proposed code, tests, and analysis."].map((t, i) => <div key={i}><span className="step-number">{i + 1}</span><p>{t}</p></div>)}</div><div className="info-banner"><ShieldCheck size={18}/><p>Demo mode is simulated. Live mode requires local Ollama. This version does not execute code, train models, browse the web, or claim Opus-level performance.</p></div></DialogContent></Dialog>
+    <Dialog open={help} onOpenChange={setHelp}><DialogContent className="app-dialog"><DialogTitle>From request to reviewed output</DialogTitle><DialogDescription>Relay is a local-first, multi-agent development workspace.</DialogDescription><div className="help-steps">{["Choose or create a project under Your projects.", "Describe your task in English or Russian.", "Review the orchestrator’s plan and approve it.", "Specialists work sequentially, sharing their outputs.", "Review and export the proposed code, tests, and analysis."].map((t, i) => <div key={i}><span className="step-number">{i + 1}</span><p>{t}</p></div>)}</div><div className="info-banner"><ShieldCheck size={18}/><p>Relay runs a local model through llama.cpp or Ollama on the Relay PC. It does not execute code, train models, or claim Opus-level performance.</p></div></DialogContent></Dialog>
+  </div>;
+}
+function InferenceDevice({ status }: { status: any }) {
+  const d = status?.inference;
+  return <div className="inference-device" data-testid="inference-device"><span className="field-label">GPU USED FOR MODEL INFERENCE</span>
+    {!d ? <p>Unknown: checking the model server…</p> : <>
+      <strong>{d.state === "confirmed" ? d.devices.join(", ") : d.state === "cpu" ? "CPU only (no GPU offload)" : "Unknown"}</strong>
+      <p>{[d.backend && `Backend ${d.backend}`, d.offloaded].filter(Boolean).join(" · ")}{d.note ? `${d.backend || d.offloaded ? ". " : ""}${d.note}` : ""}</p>
+      {d.evidence && <small>Evidence: {d.evidence}. Installed but unused GPUs are not listed.</small>}</>}
   </div>;
 }
 function PageHeading({ eyebrow, title, text, action }: { eyebrow: string; title: string; text: string; action?: any }) { return <div className="page-heading"><div><div className="eyebrow">{eyebrow}</div><h1>{title}</h1><p>{text}</p></div>{action}</div>; }

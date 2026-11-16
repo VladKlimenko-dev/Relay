@@ -21,6 +21,7 @@ export interface IStorage {
   create(kind: string, data: unknown): any;
   update(id: number, data: unknown): any;
   deleteRun(id: number): void;
+  remove(id: number, kind: string): void;
 }
 class DatabaseStorage implements IStorage {
   deleteRun(id: number) {
@@ -28,6 +29,7 @@ class DatabaseStorage implements IStorage {
     deleteSession(id);
     q.delete.run(id, "run");
   }
+  remove(id: number, kind: string) { if (kind === "run") this.deleteRun(id); else q.delete.run(id, kind); }
   list(kind: string) { return (q.list.all(kind) as Row[]).map(unpack); }
   get(id: number, kind: string) { const r = q.get.get(id) as Row | undefined; return r?.kind === kind ? unpack(r) : undefined; }
   create(kind: string, data: unknown) {
@@ -58,10 +60,30 @@ const defaultAgents: Agent[] = [
   { role: "analyst", name: "Reviewer", model: "qwen3.8:27b", enabled: true, prompt: "Independently review all prior outputs against the user's request. Find concrete issues, suggest fixes and summarize deliverables and remaining work. Distinguish generated proposals from verified results. No tools are available to compile, execute or collect data. Reply in the user's language." },
 ];
 if (!storage.list("agents").length) storage.create("agents", { items: defaultAgents });
-if (!storage.list("project").length) storage.create("project", {
-  name: "Getting started", language: "Python", description: "A small example project to explore the workflow.", sample: true,
-  files: [{ name: "README.md", content: "# Example project\nA local-first task API. This is sample context, not your repository.\nUse Python and FastAPI. Store task IDs, titles and completion status. Include validation and tests." }],
-} satisfies ProjectBody);
+// The "Getting started" example is no longer seeded. Migrate an existing one without losing real work:
+// keep it (renamed "General") when it has conversations or user files; remove only the untouched example.
+const EXAMPLE_README = "# Example project\nA local-first task API. This is sample context, not your repository.\nUse Python and FastAPI. Store task IDs, titles and completion status. Include validation and tests.";
+for (const p of storage.list("project").filter((p: any) => p.sample)) {
+  const files = (p.files || []).filter((f: any) => !(f.name === "README.md" && f.content === EXAMPLE_README));
+  const used = storage.list("run").some((r: any) => r.projectId === p.id) || storage.list("asset").some((a: any) => a.projectId === p.id) || storage.list("folder").some((f: any) => f.projectId === p.id);
+  if (!used && !files.length && !p.repo) { storage.remove(p.id, "project"); continue; }
+  const { id, sample, ...body } = p;
+  storage.update(id, { ...body, files, name: p.name === "Getting started" ? "General" : p.name,
+    description: p.description === "A small example project to explore the workflow." ? "Conversations moved from the former example project." : p.description });
+}
+// Every conversation belongs to a project. Conversations without one go to "General".
+export function generalProjectId() {
+  const existing = storage.list("project").find((p: any) => p.name === "General" && !p.repo && !p.archived);
+  return existing ? existing.id : storage.create("project", { name: "General", description: "Default project for conversations.", language: "Mixed", files: [] } satisfies ProjectBody).id;
+}
+{
+  const projectIds = new Set(storage.list("project").map((p: any) => p.id));
+  for (const run of storage.list("run").filter((r: any) => !r.projectId || !projectIds.has(r.projectId))) {
+    const general = generalProjectId(); projectIds.add(general);
+    const { id, ...body } = run;
+    storage.update(id, { ...body, projectId: general, projectName: "General" });
+  }
+}
 if (!storage.list("evaluation").length) {
   for (const [name, language] of [["Implement a thread-safe work queue", "C++"], ["Fix async cancellation and add tests", "C#"], ["Build a validated REST endpoint", "Python"], ["Implement an accessible CRUD interface", "Web"]]) {
     storage.create("evaluation", { name, language, candidate: "pending", reference: "pending", note: "" });

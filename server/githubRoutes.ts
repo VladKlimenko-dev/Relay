@@ -89,7 +89,7 @@ export async function repoContext(project: any, request: string, budget: number)
   g += `\nOPEN PULL REQUESTS:\n${pullsText}\n`;
   const text = sel.text + g.slice(0, gitBudget);
   const shown = sel.chosen.slice(0, 6).join(", ") + (sel.chosen.length > 6 ? ", ..." : "");
-  return { text, note: `Context: ${sel.chosen.length} of ${idx.files.length} files from ${r.fullName} selected (${text.length.toLocaleString("en-US")} characters)${shown ? `: ${shown}` : ""}` };
+  return { text, files: sel.chosen as string[], note: `Context: ${sel.chosen.length} of ${idx.files.length} files from ${r.fullName} selected (${text.length.toLocaleString("en-US")} characters)${shown ? `: ${shown}` : ""}` };
 }
 
 const fail = (res: Response, e: any) => res.status(e instanceof GitHubError ? e.status : 500).json({ message: e.message || "Failed." });
