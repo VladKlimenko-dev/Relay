@@ -8,6 +8,7 @@ import path from "node:path";
 import { saveAsset, listAssets, deleteAsset, assetPath, isText, foldersFor, folderContext, validateRoot, resolveInside, type Asset, type Folder } from "./workspaceStore";
 import { detectInference } from "./inferenceDevice";
 import { inventoryTarget, runInventory, inventoryText, inventoryFile, InventoryError, type InventoryTarget } from "./repoInventory";
+import { ThinkingSummarizer } from "./summarizer";
 import { registerGitHubRoutes, repoContext, changeInstructions, runGitAction, describeAction, applyingRuns } from "./githubRoutes";
 import { registerSearchRoutes, searchEnabled, research, researchSchema, type ResearchItem } from "./websearch";
 import { detectWorkflow, detectGitActions, mentionsGitHub, gitActionSchema, type GitAction } from "./intent";
@@ -72,7 +73,8 @@ function finishWork(run: Run) {
     run.events.push(event("Paused and saved. Resume continues from saved text; model internal state is not saved."));
     saveRun(run);
   }
-  if (progress) lastStream = { runId: run.id, label: progress.label, log: progress.log, endedAt: new Date().toISOString() };
+  summarizer.cancel();
+  if (progress) lastStream = { runId: run.id, label: progress.label, log: progress.log, endedAt: new Date().toISOString(), summary: run.thinkingSummary };
   controllers.delete(run.id); liveRuns.delete(run.id); progress = null;
 }
 // Save only visible response text, not separate model reasoning or an unfinished <think> block.
@@ -84,7 +86,9 @@ type Progress = { label: string; phase: "waiting" | "prompt" | "thinking" | "wri
 let progress: Progress | null = null;
 // Rolling buffer of text actually streamed by the runtime (reasoning + answer), kept after the generation ends.
 export const STREAM_LINES = 300, STREAM_CHARS = 120_000;
-let lastStream: { runId: number; label: string; log: string; endedAt: string } | null = null;
+let lastStream: { runId: number; label: string; log: string; endedAt: string; summary?: Run["thinkingSummary"] } | null = null;
+// Optional CPU-only summarizer (display only). Enabled state is saved; the endpoint comes from start-relay.ps1.
+const summarizer = new ThinkingSummarizer(process.env.RELAY_SUMMARIZER_URL, true, Math.max(2, Number(process.env.RELAY_SUMMARY_SECONDS) || 25) * 1000);
 export function appendStream(log: string, piece: string) {
   let next = log + piece;
   if (piece.includes("\n") || next.length > STREAM_CHARS) {
@@ -445,14 +449,36 @@ export async function registerRoutes(httpServer: Server, app: Express): Promise<
     row.items = row.items.map((a: Agent) => a.role === input.data.role ? { ...input.data, enabled: input.data.role === "orchestrator" ? true : input.data.enabled } : a);
     storage.update(row.id, row); res.json(row.items);
   });
+  // Display-only reasoning summaries: one request at a time, skipped (not queued) while busy; never fed to any prompt.
+  const savedSummarizer = storage.list("summarizer")[0];
+  if (savedSummarizer) summarizer.setEnabled(savedSummarizer.enabled !== false);
+  setInterval(() => {
+    const live = [...liveRuns.values()][0], p = progress;
+    if (!live || !p) return;
+    const key = `${live.id}:${live.turns?.length || 0}:${p.startedAt}`;
+    summarizer.tick(key, p.log, p.thinkTokens, s => {
+      const run = liveRuns.get(live.id);
+      if (!run || (s && progress?.startedAt !== p.startedAt)) return; // stale: the generation already changed
+      if (!s && !run.thinkingSummary) return;
+      run.thinkingSummary = s; saveRun(run);
+    });
+  }, 2000).unref();
+  app.get("/api/summarizer", (_req, res) => res.json(summarizer.status()));
+  app.put("/api/summarizer", (req, res) => {
+    const input = z.object({ enabled: z.boolean() }).safeParse(req.body);
+    if (!input.success) return res.status(400).json({ message: "Send { enabled: true|false }." });
+    const row = storage.list("summarizer")[0];
+    if (row) storage.update(row.id, { enabled: input.data.enabled }); else storage.create("summarizer", { enabled: input.data.enabled });
+    summarizer.setEnabled(input.data.enabled); res.json(summarizer.status());
+  });
   app.get("/api/progress", (_req, res) => {
-    if (!progress || !busy()) return res.json({ active: false, last: lastStream });
+    if (!progress || !busy()) return res.json({ active: false, last: lastStream, summarizer: summarizer.status() });
     const now = Date.now(), p = progress, generated = p.thinkTokens + p.outTokens;
     const genSeconds = p.firstTokenAt ? (now - p.firstTokenAt) / 1000 : 0;
     res.json({ active: true, label: p.label, phase: p.phase, elapsedSeconds: Math.round((now - p.startedAt) / 1000),
       promptTotal: p.promptTotal, promptDone: p.promptDone, thinkTokens: p.thinkTokens, outTokens: p.outTokens,
       tokensPerSecond: genSeconds > 2 ? Math.round(generated / genSeconds * 10) / 10 : null, tail: p.tail, log: p.log,
-      runId: [...controllers.keys()][0] ?? null });
+      runId: [...controllers.keys()][0] ?? null, summary: [...liveRuns.values()][0]?.thinkingSummary, summarizer: summarizer.status() });
   });
   app.get("/api/runtime", async (_req, res) => {
     const info = { runtime: RUNTIME_LABEL, modelOverride: MODEL_OVERRIDE || null, endpoint: ENDPOINT, context: CTX, sourceChars: SOURCE_CHARS, priorChars: PRIOR_CHARS, maxTokens: MAX_TOKENS, thinking: THINK, timeoutMinutes: TIMEOUT_MIN };

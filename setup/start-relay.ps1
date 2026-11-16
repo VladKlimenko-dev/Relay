@@ -16,6 +16,7 @@ param(
   [switch]$KvInRam,
   [int]$Port = 5000,
   [int]$LlamaPort = 8080,
+  [switch]$NoSummarizer,   # do not start the small CPU model for thinking summaries
   [switch]$NoBrowser
 )
 $ErrorActionPreference = "Continue"
@@ -111,6 +112,31 @@ if ($Runtime -eq "llamacpp") {
     Write-Host "Ollama already running. For best memory use set OLLAMA_FLASH_ATTENTION=1 and OLLAMA_KV_CACHE_TYPE=q8_0 in Windows environment variables and restart Ollama." -ForegroundColor Yellow
   }
   $env:RELAY_RUNTIME = "ollama"
+}
+
+# Thinking summarizer: separate CPU-only llama-server on a loopback port, few threads, below-normal priority.
+# Display only; Relay works normally when it is missing, slow or fails.
+$cpuServer = Join-Path $Root "tools\llama.cpp-cpu\llama-server.exe"
+$sumModel = Join-Path $Root ("models\" + $RelaySummarizer.File)
+$sumPort = $RelaySummarizer.Port
+Remove-Item Env:RELAY_SUMMARIZER_URL -ErrorAction SilentlyContinue
+if (-not $NoSummarizer -and $cfg.summarizer -and (Test-Path $cpuServer) -and (Test-Path $sumModel)) {
+  try {
+    if (-not (Up "http://127.0.0.1:$sumPort/health")) {
+      $gpuDevs = @(& $cpuServer --list-devices 2>&1 | Where-Object { "$_" -match "^\s*(Vulkan|SYCL|CUDA)\d+:" })
+      if ($gpuDevs.Count) { throw "tools\llama.cpp-cpu reports a GPU device; not starting it" }
+      $threads = [math]::Max(1, [math]::Min(4, [int][math]::Floor([Environment]::ProcessorCount / 4)))
+      $sumArgs = @("-m", "`"$sumModel`"", "-c", "4096", "-ngl", "0", "-t", $threads, "-tb", $threads, "-np", "1",
+        "--host", "127.0.0.1", "--port", $sumPort, "--alias", "relay-summarizer")
+      Backup-RelayLogs $LogDir "summarizer"
+      $sumProcess = Start-Process -FilePath $cpuServer -ArgumentList $sumArgs -WorkingDirectory (Split-Path $cpuServer) -WindowStyle Hidden -PassThru -ErrorAction Stop `
+        -RedirectStandardOutput (Join-Path $LogDir "summarizer.stdout.log") -RedirectStandardError (Join-Path $LogDir "summarizer.stderr.log")
+      try { $sumProcess.PriorityClass = [System.Diagnostics.ProcessPriorityClass]::BelowNormal } catch { Write-Host "Could not lower the summarizer priority." -ForegroundColor Yellow }
+      Save-RelayProcess $Root ".relay-summarizer.json" $sumProcess
+      Write-Host "Thinking summarizer starting on CPU ($threads threads, port $sumPort, below-normal priority). Log: logs\summarizer.stderr.log"
+    }
+    $env:RELAY_SUMMARIZER_URL = "http://127.0.0.1:$sumPort/v1"
+  } catch { Write-Host "Thinking summarizer not started: $($_.Exception.Message). Relay continues without it." -ForegroundColor Yellow }
 }
 
 $env:NODE_ENV = "production"

@@ -167,3 +167,7 @@ button,input,textarea,select{font:inherit}button,a,input,textarea,select{-webkit
 .inference-device{display:flex;flex-direction:column;gap:4px;padding:var(--space-4) 0}.inference-device strong{font-size:14px}.inference-device p,.inference-device small{color:var(--muted);font-size:12px}
 .answer-card, .inventory-card { padding: 12px 14px; }
 .answer-label { display: block; color: var(--muted, #8a8f98); margin-bottom: 6px; font-size: 11px; letter-spacing: .02em; }
+.thinking-summary { border-left: 2px solid var(--accent, #6aa36f); padding: 4px 10px; margin: 6px 0; }
+.thinking-summary small { color: var(--muted, #8a8f98); font-size: 11px; }
+.thinking-summary p { margin: 2px 0 0; }
+.checkbox-row { display: flex; gap: 8px; align-items: center; margin-top: 6px; }

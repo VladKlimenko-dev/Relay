@@ -10,6 +10,7 @@ export type RunBody = { request: string; mode: "demo" | "ollama"; projectId: num
   turns?: RunTurn[]; messageAt?: string; title?: string; archived?: boolean;
   connectorSources?: { repo: string; branch: string; path: string; url: string }[];
   route?: "direct" | "plan"; answer?: { text: string; status: "running" | "complete"; tokens?: number; elapsed?: number }; answerRequest?: ModelRequest;
+  thinkingSummary?: { text: string; at: string; key: string }; // display only; never part of any prompt
   inventory?: { repo: string; branch: string; commit: string; exts: string[]; total: number; treeFiles: number; partial: boolean; text: string };
   localSources?: { folderId: number; root: string; path: string; kind: "listing" | "file"; bytes?: number }[];
   phase?: "planning" | "execution"; contextReady?: boolean; planningOutput?: string; savedAt?: string;

@@ -46,6 +46,8 @@ try {
   }
   if (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) { $needsSetup = $true }
   if (-not (Get-Command git -ErrorAction SilentlyContinue)) { $needsSetup = $true }
+  # Thinking summarizer: install once for existing setups; a recorded failure (summarizer = false) is not retried here.
+  if ($config -and $null -eq $config.summarizer) { $needsSetup = $true }
   if ($selectedRuntime -eq "llamacpp") {
     $spec = $RelayModels[$selectedModel]
     $modelFile = Join-Path $Root ("models\" + $spec.File)

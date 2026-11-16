@@ -19,7 +19,8 @@ param(
   [ValidateSet("auto", "vulkan", "sycl", "cuda", "cpu")] [string]$Backend = "auto",
   [switch]$Toolchains,
   [switch]$SkipModels,
-  [switch]$UpdateLlama
+  [switch]$UpdateLlama,
+  [switch]$NoSummarizer    # skip the small CPU model for thinking summaries
 )
 $ErrorActionPreference = "Continue"   # native tools write to stderr; failures are checked explicitly
 # winget, npm, Python and llama.cpp print UTF-8; without this, Russian Windows (OEM 866) shows garbled text.
@@ -247,6 +248,47 @@ if (-not $SkipModels) {
   }
 }
 
+# ---------------------------------------------------------------- thinking summarizer (CPU only, optional)
+# A separate CPU-only llama.cpp build guarantees the small model never touches the GPU used by the main model.
+# Any failure here only disables the feature; it never stops setup.
+$SummarizerReady = $false
+if (-not $NoSummarizer) {
+  Step "Thinking summarizer (small CPU-only model, display only)"
+  try {
+    $cpuDir = Join-Path $ToolsDir "llama.cpp-cpu"
+    $cpuServer = Join-Path $cpuDir "llama-server.exe"
+    if (-not (Test-Path $cpuServer) -or $UpdateLlama) {
+      $releases = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=15" -Headers @{ "User-Agent" = "relay-setup" } -ErrorAction Stop
+      $asset = $null; $tag = $null
+      foreach ($r in $releases) { $asset = $r.assets | Where-Object { $_.name -match "^llama-b\d+-bin-win-cpu-x64\.zip$" } | Select-Object -First 1; if ($asset) { $tag = $r.tag_name; break } }
+      if (-not $asset) { throw "no Windows CPU llama.cpp build in recent releases" }
+      if (Test-Path $cpuDir) { Remove-Item -Recurse -Force $cpuDir -ErrorAction Stop }
+      $zip = Join-Path $env:TEMP $asset.name
+      Download $asset.browser_download_url $zip
+      Expand-Archive -Path $zip -DestinationPath $cpuDir -Force -ErrorAction Stop
+      $found = Get-ChildItem -Path $cpuDir -Recurse -Filter "llama-server.exe" | Select-Object -First 1
+      if (-not $found) { throw "llama-server.exe not found in the CPU archive" }
+      if ($found.DirectoryName -ne $cpuDir) { Get-ChildItem $found.DirectoryName | Move-Item -Destination $cpuDir -Force }
+      "$tag cpu-x64" | Set-Content (Join-Path $cpuDir "VERSION.txt")
+    }
+    $gpuDevs = @(& $cpuServer --list-devices 2>&1 | Where-Object { "$_" -match "^\s*(Vulkan|SYCL|CUDA)\d+:" })
+    if ($gpuDevs.Count) { throw "the CPU build reports a GPU device; refusing to use it for the summarizer" }
+    Ok ("CPU llama-server " + (Get-Content (Join-Path $cpuDir "VERSION.txt") -ErrorAction SilentlyContinue))
+    $sf = Join-Path $ModelsDir $RelaySummarizer.File
+    if (-not ((Test-Path $sf) -and (Get-Item $sf).Length -eq $RelaySummarizer.Bytes)) {
+      Info "Downloading $($RelaySummarizer.File) ($([math]::Round($RelaySummarizer.Bytes / 1MB)) MB) from $($RelaySummarizer.Repo)"
+      New-Item -ItemType Directory -Force -Path $ModelsDir | Out-Null
+      Invoke-Py (Join-Path $PSScriptRoot "download_model.py") $RelaySummarizer.Repo $RelaySummarizer.File $ModelsDir $RelaySummarizer.Revision | Out-Host
+      if ($LASTEXITCODE -ne 0) { throw "download failed (re-run setup to resume)" }
+    }
+    if ((Get-Item $sf).Length -ne $RelaySummarizer.Bytes) { throw "$($RelaySummarizer.File) has the wrong size" }
+    $hash = (Get-FileHash -Algorithm SHA256 -LiteralPath $sf).Hash.ToLower()
+    if ($hash -ne $RelaySummarizer.Sha256) { Remove-Item -LiteralPath $sf -Force; throw "$($RelaySummarizer.File) SHA-256 mismatch; the file was removed" }
+    Ok "$($RelaySummarizer.File) present, size and SHA-256 verified"
+    $SummarizerReady = $true
+  } catch { Warn "Thinking summarizer disabled: $($_.Exception.Message). Relay works without it." }
+}
+
 # ---------------------------------------------------------------- toolchains
 Step "Developer toolchains (for compile/test work)"
 if (Has "dotnet") { $sdks = & dotnet --list-sdks 2>$null } else { $sdks = $null }
@@ -277,6 +319,7 @@ $cfg = [ordered]@{
   backend = $Backend
   models  = $Selected
   python  = (@($PyExe) + $PyPre) -join " "
+  summarizer = $SummarizerReady
 }
 $cfg | ConvertTo-Json | Set-Content (Join-Path $Root "relay-config.json")
 Ok "Saved relay-config.json"

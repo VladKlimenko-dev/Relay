@@ -10,12 +10,16 @@ function Save-RelayProcess([string]$Root, [string]$Marker, $Process) {
     ConvertTo-Json | Set-Content -LiteralPath (Join-Path $Root $Marker) -Encoding UTF8 -ErrorAction Stop
 }
 function Stop-RelayOwnedModel([string]$Root) {
-  $marker = Join-Path $Root ".relay-model.json"
+  Stop-RelayOwnedProcess $Root ".relay-summarizer.json" @("llama-server")
+  Stop-RelayOwnedProcess $Root ".relay-model.json" @("llama-server", "ollama")
+}
+function Stop-RelayOwnedProcess([string]$Root, [string]$Marker, [string[]]$Names) {
+  $marker = Join-Path $Root $Marker
   if (-not (Test-Path -LiteralPath $marker)) { return }
   $saved = Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json
   $process = Get-Process -Id $saved.pid -ErrorAction SilentlyContinue
   if ($process -and $process.StartTime.ToUniversalTime().Ticks -eq ([DateTime]$saved.startedAt).ToUniversalTime().Ticks) {
-    if ($process.ProcessName -notin @("llama-server", "ollama") -or -not $saved.executable -or $process.Path -ne $saved.executable) {
+    if ($process.ProcessName -notin $Names -or -not $saved.executable -or $process.Path -ne $saved.executable) {
       throw "Model process identity does not match; it was not stopped."
     }
     # Include model runner children (notably Ollama's GPU worker), but never stop by process name.

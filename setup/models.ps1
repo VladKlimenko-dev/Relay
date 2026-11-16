@@ -37,3 +37,15 @@ $RelayModels = [ordered]@{
     ArcCtx    = 32768
   }
 }
+
+# Small CPU-only model for display-only summaries of the main model's thinking (Russian/English, Apache-2.0).
+# Pinned to a Hugging Face revision; size and SHA-256 are the LFS metadata of that revision.
+$RelaySummarizer = @{
+  Label    = "Qwen2.5-1.5B-Instruct Q4_K_M (CPU thinking summaries)"
+  Repo     = "Qwen/Qwen2.5-1.5B-Instruct-GGUF"
+  Revision = "91cad51170dc346986eccefdc2dd33a9da36ead9"
+  File     = "qwen2.5-1.5b-instruct-q4_k_m.gguf"
+  Bytes    = 1117320736
+  Sha256   = "6a1a2eb6d15622bf3c96857206351ba97e1af16c30d7a74ee38970e434e9407e"
+  Port     = 8091
+}
